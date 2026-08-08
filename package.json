@@ -1,0 +1,19 @@
+{
+  "name": "expense-tracker",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "typecheck": "pnpm -r --parallel typecheck",
+    "db:up": "docker compose up -d",
+    "db:down": "docker compose down",
+    "db:nuke": "docker compose down -v",
+    "db:psql": "docker compose exec postgres psql -U postgres -d expense_tracker",
+    "electric:logs": "docker compose logs -f electric"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.2"
+  }
+}

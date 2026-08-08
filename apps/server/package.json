@@ -1,0 +1,17 @@
+{
+  "name": "@et/server",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "dev": "node --watch src/index.ts"
+  },
+  "dependencies": {
+    "@et/shared": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "typescript": "^5.9.2"
+  }
+}

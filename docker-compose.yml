@@ -1,0 +1,41 @@
+name: expense-tracker
+
+services:
+  postgres:
+    image: docker.io/postgres:18-alpine
+    container_name: et-postgres
+    environment:
+      POSTGRES_DB: expense_tracker
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password   # local only. Never ship this.
+    ports:
+      - '54321:5432'                # 54321 avoids clashing with a local Postgres on 5432
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    command:
+      - -c
+      - listen_addresses=*
+      - -c
+      - wal_level=logical           # required by Electric. Without it, Electric refuses to start.
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres -d expense_tracker']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  electric:
+    image: docker.io/electricsql/electric:latest
+    container_name: et-electric
+    environment:
+      DATABASE_URL: postgresql://postgres:password@postgres:5432/expense_tracker?sslmode=disable
+      # Local dev without an auth secret. If the container rejects this env var,
+      # delete it — the flag name has changed across versions.
+      ELECTRIC_INSECURE: 'true'
+    ports:
+      - '3000:3000'
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  pgdata:

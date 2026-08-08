@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.env
+*.log
+
+# Expo / CNG output — generated, not source
+apps/mobile/.expo/
+apps/mobile/android/
+apps/mobile/ios/
