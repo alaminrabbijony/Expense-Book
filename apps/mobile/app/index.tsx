@@ -1,4 +1,5 @@
 import ExpenseForm from "@/comp/ExpenseForm";
+import { insertExpense, listExpenses } from "@/db/expenses";
 import { useState } from "react";
 import {
   Text,
@@ -103,14 +104,12 @@ const formatBDT = (amountMinor: number) => {
 // const totalMinor = EXPENSES.reduce((sum, e) => sum + e.amountMinor, 0);
 
 export default function Index() {
-  const [expense, setExpense] = useState<Exp[]>(INITIAL_EXPENSES);
+    // The function form runs ONCE, on first render — not on every render.
+  const [expense, setExpense] = useState<Exp[]>(()=> listExpenses());
 
   const addExpense = (title: string, amountMinor: number) => {
-    setExpense((prev) => [
-      // TODO(Milestone 3): real UUID, generated on-device,
-      { id: `${Date.now()}`, title, amountMinor },
-      ...prev,
-    ]);
+   insertExpense(title, amountMinor)
+   setExpense(listExpenses())
   };
 
   const totalMinor = expense.reduce((sum, e) => sum + e.amountMinor, 0)

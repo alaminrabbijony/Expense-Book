@@ -6,6 +6,7 @@
     "node": ">=24"
   },
   "scripts": {
+    "start": "pnpm --filter @et/mobile start",
     "typecheck": "pnpm -r --parallel typecheck",
     "db:up": "docker compose up -d",
     "db:down": "docker compose down",
