@@ -1,5 +1,5 @@
 import ExpenseForm from "@/comp/ExpenseForm";
-import { insertExpense, listExpenses } from "@/db/expenses";
+import { debugAmountTypes, insertExpense, listExpenses } from "@/db/expenses";
 import { useState } from "react";
 import {
   Text,
@@ -105,7 +105,10 @@ const formatBDT = (amountMinor: number) => {
 
 export default function Index() {
     // The function form runs ONCE, on first render — not on every render.
-  const [expense, setExpense] = useState<Exp[]>(()=> listExpenses());
+  const [expense, setExpense] = useState<Exp[]>(()=> {
+    debugAmountTypes()
+   return listExpenses()
+  });
 
   const addExpense = (title: string, amountMinor: number) => {
    insertExpense(title, amountMinor)

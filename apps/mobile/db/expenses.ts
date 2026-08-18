@@ -52,3 +52,17 @@ export const insertExpense = (title: string, amountMinor: number): Expense => {
 
   return expense;
 }
+export const debugAmountTypes = () => {
+  const rows = all<{
+    id: string;
+    title: string;
+    amount_minor: number;
+    t: string;
+    currency_code: string;
+  }>(
+    `SELECT id, title, amount_minor, typeof(amount_minor) AS t, currency_code
+       FROM expenses
+      ORDER BY created_at DESC, id DESC`
+  );
+  console.log(JSON.stringify(rows, null, 2));
+};
