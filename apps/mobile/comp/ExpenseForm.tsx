@@ -1,10 +1,11 @@
 import { View, Text, TextInput, StyleSheet, Pressable } from "react-native";
 import React, { useRef, useState } from "react";
-import { DEFAULT_CURRENCY, sanitizeAmount, toMinor } from "@/helpers/helper";
+import { DEFAULT_CURRENCY, type Minor, sanitizeAmount, toMinor } from '@et/shared';
+
 
 
 type props = {
-  onAdd: (title: string, amountMinor: number, currency: string) => void;
+  onAdd: (title: string, amountMinor: Minor, currency: string) => void;
 };
 
 export default function ExpenseForm({ onAdd }: props) {
@@ -22,7 +23,7 @@ export default function ExpenseForm({ onAdd }: props) {
 
     if (amountMinor === null) return;
 
-    // parsing comes in Step 4 — deliberately naive for now
+   
     onAdd(title.trim(), amountMinor, DEFAULT_CURRENCY);
     setTitle("");
     setAmount("");

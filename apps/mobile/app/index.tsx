@@ -1,7 +1,7 @@
 import ExpenseForm from "@/comp/ExpenseForm";
-import { insertExpense, listExpenses, debugAmountTypes } from "@/db/expenses";
-import { formatMoney, DEFAULT_CURRENCY } from "@/helpers/helper";
+import { insertExpense, listExpenses } from "@/db/expenses";
 import type { Expense } from "@/db/expenses";
+import { asMinor, DEFAULT_CURRENCY, formatMoney, type Minor } from "@et/shared";
 import { useState } from "react";
 import {
   Text,
@@ -16,18 +16,20 @@ import { SafeAreaView } from "react-native-safe-area-context";
 export default function Index() {
   // The function form runs ONCE, on first render — not on every render.
   const [expense, setExpense] = useState<Expense[]>(() => {
-    debugAmountTypes();
+    //debugAmountTypes();
     return listExpenses();
   });
 
-  const addExpense = (title: string, amountMinor: number, currency: string) => {
+  const addExpense = (title: string, amountMinor: Minor, currency: string) => {
     insertExpense(title, amountMinor, currency);
     setExpense(listExpenses());
   };
 
   // Only valid because everything is BDT. Adding amounts in different
   // currencies is meaningless — Milestone 12's problem, not today's.
-  const totalMinor = expense.reduce((sum, e) => sum + e.amountMinor, 0);
+  const totalMinor = asMinor(
+    expense.reduce((sum, e) => sum + e.amountMinor, 0),
+  );
 
   return (
     <SafeAreaView style={styles.screen}>

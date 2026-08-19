@@ -1,9 +1,10 @@
+import { asMinor, type Minor } from "@et/shared";
 import { all, run } from ".";
 
 export type Expense = {
   id: string;
   title: string;
-  amountMinor: number;
+  amountMinor: Minor;
   currencyCode: string;
   createdAt: number;
 };
@@ -20,7 +21,10 @@ const toExpense = (row: ExpenseRow): Expense => {
   return {
     id: row.id,
     title: row.title,
-    amountMinor: row.amount_minor,
+    // The read boundary. SQLite hands back an untyped number and this
+    // is the only place it becomes Minor. A stored float throws here,
+    // loudly, instead of being rounded away by the display.
+    amountMinor: asMinor(row.amount_minor),
     currencyCode: row.currency_code,
     createdAt: row.created_at,
   };
@@ -37,7 +41,7 @@ export const listExpenses = (): Expense[] => {
 
 export const insertExpense = (
   title: string,
-  amountMinor: number,
+  amountMinor: Minor,
   currencyCode: string,
 ): Expense => {
   const expense: Expense = {
