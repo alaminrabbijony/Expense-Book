@@ -1,9 +1,10 @@
 import { View, Text, TextInput, StyleSheet, Pressable } from "react-native";
 import React, { useRef, useState } from "react";
-import { sanitizeAmount, toMinorBDT } from "@/helpers/helper";
+import { DEFAULT_CURRENCY, sanitizeAmount, toMinor } from "@/helpers/helper";
+
 
 type props = {
-  onAdd: (title: string, amountMinor: number) => void;
+  onAdd: (title: string, amountMinor: number, currency: string) => void;
 };
 
 export default function ExpenseForm({ onAdd }: props) {
@@ -12,12 +13,17 @@ export default function ExpenseForm({ onAdd }: props) {
   const titleRef = useRef<TextInput>(null);
   const amountRef = useRef<TextInput>(null);
 
-  const amountMinor = toMinorBDT(amount);
+  const amountMinor = toMinor(amount, DEFAULT_CURRENCY);
   const canSave = amountMinor !== null && title.trim().length > 0;
 
   const handleSave = () => {
+    // The keyboard's "done" key calls this directly and ignores the
+    // disabled button, so the guard is real protection, not decoration.
+
+    if (amountMinor === null) return;
+
     // parsing comes in Step 4 — deliberately naive for now
-    onAdd(title, Number(amount) * 100);
+    onAdd(title.trim(), amountMinor, DEFAULT_CURRENCY);
     setTitle("");
     setAmount("");
     amountRef.current?.focus();
@@ -28,7 +34,7 @@ export default function ExpenseForm({ onAdd }: props) {
       <TextInput
         style={styles.input}
         value={amount}
-        onChangeText={(t) => setAmount(sanitizeAmount(t))}
+        onChangeText={(t) => setAmount(sanitizeAmount(t, DEFAULT_CURRENCY))}
         placeholder="0.00"
         keyboardType="decimal-pad"
         maxLength={12}
@@ -44,8 +50,12 @@ export default function ExpenseForm({ onAdd }: props) {
         placeholder="What for?"
         placeholderTextColor="#9aa0a6"
       />
-      <Pressable style={[styles.button, !canSave && { opacity: 0.4 }]} onPress={handleSave} disabled={!canSave}>
-        <Text style={styles.buttonText}>Add Exoense</Text>
+      <Pressable
+        style={[styles.button, !canSave && { opacity: 0.4 }]}
+        onPress={handleSave}
+        disabled={!canSave}
+      >
+        <Text style={styles.buttonText}>Add Expense</Text>
       </Pressable>
     </View>
   );

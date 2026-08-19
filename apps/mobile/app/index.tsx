@@ -1,5 +1,7 @@
 import ExpenseForm from "@/comp/ExpenseForm";
-import { debugAmountTypes, insertExpense, listExpenses } from "@/db/expenses";
+import { insertExpense, listExpenses, debugAmountTypes } from "@/db/expenses";
+import { formatMoney, DEFAULT_CURRENCY } from "@/helpers/helper";
+import type { Expense } from "@/db/expenses";
 import { useState } from "react";
 import {
   Text,
@@ -10,118 +12,30 @@ import {
   Platform,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-type Expense = {
-  id: string;
-  title: string;
-  category: string;
-  currency: string;
-  amountMinor: number;
-  spentAt: string;
-};
-
-type Exp = {
-  id: string;
-  title: string;
-  amountMinor: number;
-};
-
-const EXPENSES: Expense[] = [
-  {
-    id: "1",
-    title: "Lunch — Chomchom",
-    category: "Food",
-    amountMinor: 12500,
-    currency: "BDT",
-    spentAt: "Today, 1:40 PM",
-  },
-  {
-    id: "2",
-    title: "Rickshaw to campus",
-    category: "Transport",
-    amountMinor: 4000,
-    currency: "BDT",
-    spentAt: "Today, 9:15 AM",
-  },
-  {
-    id: "3",
-    title: "Printing thesis draft",
-    category: "Study",
-    amountMinor: 18000,
-    currency: "BDT",
-    spentAt: "Yesterday",
-  },
-  {
-    id: "4",
-    title: "Tea, twice",
-    category: "Food",
-    amountMinor: 2000,
-    currency: "BDT",
-    spentAt: "Yesterday",
-  },
-  {
-    id: "5",
-    title: "Phone recharge",
-    category: "Bills",
-    amountMinor: 30000,
-    currency: "BDT",
-    spentAt: "2 days ago",
-  },
-];
-
-const INITIAL_EXPENSES: Exp[] = [
-  {
-    id: "1",
-    title: "Lunch — Chomchom",
-    amountMinor: 12500,
-  },
-  {
-    id: "2",
-    title: "Rickshaw to campus",
-    amountMinor: 4000,
-  },
-  {
-    id: "3",
-    title: "Printing thesis draft",
-    amountMinor: 18000,
-  },
-  {
-    id: "4",
-    title: "Tea, twice",
-    amountMinor: 2000,
-  },
-  {
-    id: "5",
-    title: "Phone recharge",
-    amountMinor: 30000,
-  },
-];
-// TODO(Milestone 4): this is wrong. Not every currency has 2 decimal places.
-// JPY has 0, KWD has 3. Dividing by 100 is a bug, not a shortcut.
-const formatBDT = (amountMinor: number) => {
-  return "৳" + (amountMinor / 100).toFixed(2);
-};
-
-// const totalMinor = EXPENSES.reduce((sum, e) => sum + e.amountMinor, 0);
 
 export default function Index() {
-    // The function form runs ONCE, on first render — not on every render.
-  const [expense, setExpense] = useState<Exp[]>(()=> {
-    debugAmountTypes()
-   return listExpenses()
+  // The function form runs ONCE, on first render — not on every render.
+  const [expense, setExpense] = useState<Expense[]>(() => {
+    debugAmountTypes();
+    return listExpenses();
   });
 
-  const addExpense = (title: string, amountMinor: number) => {
-   insertExpense(title, amountMinor)
-   setExpense(listExpenses())
+  const addExpense = (title: string, amountMinor: number, currency: string) => {
+    insertExpense(title, amountMinor, currency);
+    setExpense(listExpenses());
   };
 
-  const totalMinor = expense.reduce((sum, e) => sum + e.amountMinor, 0)
+  // Only valid because everything is BDT. Adding amounts in different
+  // currencies is meaningless — Milestone 12's problem, not today's.
+  const totalMinor = expense.reduce((sum, e) => sum + e.amountMinor, 0);
 
   return (
     <SafeAreaView style={styles.screen}>
       <View style={styles.header}>
         <Text style={styles.headerLabel}>Spent Recently</Text>
-        <Text style={styles.headerTotal}> {formatBDT(totalMinor)}</Text>
+        <Text style={styles.headerTotal}>
+          {formatMoney(totalMinor, DEFAULT_CURRENCY)}
+        </Text>
       </View>
 
       <KeyboardAvoidingView
@@ -138,11 +52,10 @@ export default function Index() {
             <View key={e.id} style={styles.row}>
               <View style={styles.rowLeft}>
                 <Text style={styles.rowTitle}>{e.title}</Text>
-                {/* <Text style={styles.rowMeta}>
-                {e.category} · {e.spentAt}
-              </Text> */}
               </View>
-              <Text style={styles.rowAmount}>{formatBDT(e.amountMinor)}</Text>
+              <Text style={styles.rowAmount}>
+                {formatMoney(e.amountMinor, e.currencyCode)}
+              </Text>
             </View>
           ))}
         </ScrollView>
@@ -179,7 +92,6 @@ const styles = StyleSheet.create({
   },
   rowLeft: { flex: 1, paddingRight: 12 },
   rowTitle: { color: "#ECEDEE", fontSize: 16, fontWeight: "500" },
-  rowMeta: { color: "#8A8F98", fontSize: 13, marginTop: 2 },
   rowAmount: {
     color: "#ECEDEE",
     fontSize: 16,
