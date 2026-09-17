@@ -128,4 +128,36 @@ export const MIGRATIONS: string[] = [
     ('health',    'Health'),
     ('study',     'Study');
   `,
+    // 5 -> 6  ·  Milestone 5g. The index the filtered list actually needs.
+  //
+  //   category_id FIRST, then the sort columns. That order was measured,
+  //   not preferred. Pixel 8 emulator, API 36, 50,022 rows, second
+  //   readings, in milliseconds:
+  //
+  //     index shape                      food deep    rent page one
+  //     none                                    76               63
+  //     (category_id)                           40                1
+  //     this one                                11                3
+  //
+  //   (category_id) alone is FASTER than this on rent and slower on food.
+  //   It serves the WHERE and leaves the ORDER BY to a temp B-tree, and
+  //   that sort gets more expensive the deeper you page. This shape serves
+  //   both from one walk, so no filter in the table reads slower than 13ms.
+  //   The choice was made on worst case, because that is the tap a person
+  //   actually feels.
+  //
+  //   idx_expenses_created_at_id STAYS and is not replaced. This index
+  //   cannot serve the unfiltered list — category_id leads it, and the
+  //   unfiltered query has no category_id to bind. Verified rather than
+  //   assumed: with this index present, the unfiltered plan still reads
+  //   SCAN expenses USING INDEX idx_expenses_created_at_id.
+  //
+  //   IF NOT EXISTS, same reasoning as 2 -> 3. This index was built from a
+  //   dev button during the 5g measurement, so on this device it is
+  //   already here. An index holds no data of its own, so "already there"
+  //   and "just built" are the same database.
+  `
+  CREATE INDEX IF NOT EXISTS idx_expenses_category_created_at_id
+    ON expenses (category_id, created_at DESC, id DESC);
+  `,
 ];
