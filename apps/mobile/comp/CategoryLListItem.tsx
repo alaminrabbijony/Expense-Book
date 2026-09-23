@@ -1,4 +1,4 @@
-import { Pressable, StyleSheet, Text, View } from "react-native";
+import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 
 // id is nullable because ONE caller has a row that is not a category.
 // The filter's "All categories" is an item with id: null — not a mode this
@@ -22,7 +22,22 @@ type Props = {
 
 export default function CategoryList({ items, selectedId, onSelect }: Props) {
   return (
-    <View>
+    // A ScrollView, not a FlatList. A handful of rows needs no
+    // virtualization, and decisions.md keeps FlatList out of the sheets.
+    //
+    // This file cannot make the list scroll on its own. A ScrollView only
+    // scrolls when the views above it limit its height, and those views
+    // belong to the callers. If a caller lets this grow to the full height
+    // of its rows, nothing scrolls.
+    <ScrollView
+      style={styles.list}
+      // The default is "never". With a text input focused and the on-screen
+      // keyboard open, a tap on a row would only close the keyboard, and
+      // the row would never get it. The add form has title and amount
+      // inputs, so that is the normal case there. "handled" lets a row
+      // that handles the tap keep it.
+      keyboardShouldPersistTaps="handled"
+    >
       {items.map((item) => (
         <View key={item.id ?? "__null_item__"}>
           <Pressable style={styles.row} onPress={() => onSelect(item)}>
@@ -37,11 +52,17 @@ export default function CategoryList({ items, selectedId, onSelect }: Props) {
           {item.dividerAfter ? <View style={styles.divider} /> : null}
         </View>
       ))}
-    </View>
+    </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
+  // A ScrollView's built-in style has flexGrow: 1, so it would stretch into
+  // any spare room a caller has and push whatever sits below it down. The
+  // View this replaced stayed the height of its rows; flexGrow: 0 keeps
+  // that. flexShrink: 1 still comes from the built-in style — it is what
+  // lets the list get shorter than its rows, which is when it scrolls.
+  list: { flexGrow: 0 },
   row: {
     flexDirection: "row",
     alignItems: "center",

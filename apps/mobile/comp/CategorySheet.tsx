@@ -13,6 +13,9 @@ type Props = {
   selectedId: string | null;
   onSelect: (choice: CategoryChoice) => void;
   onClose: () => void;
+    // The sheet does not navigate. index.tsx does, because index owns
+  // setSheetOpen and the close has to happen before the push.
+  onManage: () => void;
 };
 
 export default function CategorySheet({
@@ -20,6 +23,7 @@ export default function CategorySheet({
   selectedId,
   onSelect,
   onClose,
+  onManage
 }: Props) {
   // The sheet no longer holds breakdown and totals separately. It holds the
   // finished list, because building that list is the only thing this
@@ -67,6 +71,7 @@ export default function CategorySheet({
       // Android hardware/gesture back. Miss this prop and back tries to
       // leave the screen with the sheet still on top of it.
       onRequestClose={onClose}
+      
     >
       <View style={styles.backdrop}>
         {/* Fills the whole modal and sits BEHIND the sheet, so a tap
@@ -74,8 +79,12 @@ export default function CategorySheet({
         <Pressable style={StyleSheet.absoluteFill} onPress={onClose} />
 
         <View style={styles.sheet}>
+                 <View style={styles.sheetHeader}>
           <Text style={styles.sheetTitle}>Filter by category</Text>
-
+          <Pressable onPress={onManage} hitSlop={10}>
+            <Text style={styles.manage}>+ Add</Text>
+          </Pressable>
+        </View>
           <CategoryList
             items={items}
             selectedId={selectedId}
@@ -110,12 +119,21 @@ const styles = StyleSheet.create({
     paddingBottom: 28,
     maxHeight: "70%",
   },
+  
+  sheetHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingHorizontal: 20,
+    paddingBottom: 8,
+  },
+  // The padding moved up to sheetHeader. Leave it on both and the title
+  // gets 40px of left inset while the + Add gets 20.
   sheetTitle: {
     color: "#8A8F98",
     fontSize: 13,
     letterSpacing: 0.5,
     textTransform: "uppercase",
-    paddingHorizontal: 20,
-    paddingBottom: 8,
   },
+  manage: { color: "#E5484D", fontSize: 14, fontWeight: "600" },
 });

@@ -1,12 +1,21 @@
 import { asMinor, DEFAULT_CURRENCY, type Minor } from "@et/shared";
 import { all, run, tx } from ".";
 
-// The one category row that must never be deleted or renamed. Migration 4
-// creates it, the backfill points 50,013 rows at it, and every insert since
-// then names it explicitly.
-//
-// Exported because 5e's picker needs to recognise it — it is the row that
-// should not get a delete button.
+/**
+ * The category row that must always exist.
+ *
+ * A migration creates it and points every uncategorised expense at it, and
+ * `insertExpense` falls back to it when the caller chooses nothing.
+ *
+ * It CAN be renamed. Renaming writes `categories.name` and leaves the id
+ * alone, so this constant and every row pointing here keep working.
+ *
+ * It CANNOT be deleted. `deleteCategory` reassigns rows INTO this id, so
+ * removing it would delete its own target.
+ *
+ * Exported because any screen showing a category list has to recognise it —
+ * it is the row that gets no delete button.
+ */
 export const UNCATEGORISED_ID = "uncategorised";
 
 export type Expense = {
@@ -17,7 +26,7 @@ export type Expense = {
   createdAt: number;
 };
 
-// What SQLite actually hands back: snake_case, exactly as declared.
+/* What SQLite hands back: snake_case, exactly as the columns are declared. */
 type ExpenseRow = {
   id: string;
   title: string;
@@ -30,9 +39,11 @@ const toExpense = (row: ExpenseRow): Expense => {
   return {
     id: row.id,
     title: row.title,
-    // The read boundary. SQLite hands back an untyped number and this
-    // is the only place it becomes Minor. A stored float throws here,
-    // loudly, instead of being rounded away by the display.
+    /*
+     * The read boundary. SQLite hands back an untyped number and this is the
+     * only place it becomes Minor. A stored float throws here, loudly,
+     * instead of being silently rounded away by the display.
+     */
     amountMinor: asMinor(row.amount_minor),
     currencyCode: row.currency_code,
     createdAt: row.created_at,
@@ -41,40 +52,55 @@ const toExpense = (row: ExpenseRow): Expense => {
 
 export const PAGE_SIZE = 50;
 
-// One page of expenses, newest first.
-// offset = how many rows to skip. 0 for the first page, 50 for the second.
-
 const LIST_PAGE_HEAD = `SELECT id, title, amount_minor, currency_code, created_at
        FROM expenses`;
 
 const LIST_PAGE_TAIL = `ORDER BY created_at DESC, id DESC`;
 
-// Unfiltered. Character for character the same query as before 5f, so the
-// numbers 5b measured still describe this string.
-const LIST_PAGE_SELECT = `${LIST_PAGE_HEAD}
+/**
+ * The unfiltered page query.
+ *
+ * Exported so the dev tooling can ask SQLite to EXPLAIN this exact text.
+ * Nothing outside this module should ever rebuild or edit it — the recorded
+ * timings for the list describe this string character for character, and a
+ * reworded version is a different query with different numbers.
+ */
+export const LIST_PAGE_SELECT = `${LIST_PAGE_HEAD}
       ${LIST_PAGE_TAIL}`;
 
-// Filtered. Two separate strings, not one string carrying
-// "WHERE (? IS NULL OR category_id = ?)".
-//
-// That clever single-string version was measured in Session 10 and SQLite
-// answered it with a full SCAN even with an index present. The planner has
-// to evaluate that test row by row, so it cannot reach for an index. 5g's
-// entire measurement depends on this string being able to.
-//
-// This text is now FINAL. 5g runs it before and after creating the index,
-// and that comparison only means something if the text does not move.
-const LIST_PAGE_SELECT_FILTERED = `${LIST_PAGE_HEAD}
+/**
+ * The filtered page query.
+ *
+ * Two separate strings rather than one carrying
+ * `WHERE (? IS NULL OR category_id = ?)`.
+ *
+ * That clever single-string version was measured and SQLite answered it with
+ * a full table scan even with an index present. The planner has to evaluate
+ * that test row by row, so it cannot reach for an index. Keeping the filter
+ * as its own plain equality is what lets the index be used at all.
+ *
+ * Exported for EXPLAIN, with the same warning as above: do not edit the text.
+ */
+export const LIST_PAGE_SELECT_FILTERED = `${LIST_PAGE_HEAD}
       WHERE category_id = ?
       ${LIST_PAGE_TAIL}`;
 
+/**
+ * One page of expenses, newest first.
+ *
+ * @param offset How many rows to skip. 0 for the first page, PAGE_SIZE for
+ *   the second, and so on.
+ * @param categoryId Omit for every category.
+ */
 export const listExpensePage = (
   offset: number,
   categoryId?: string,
 ): Expense[] => {
-  // Two calls rather than building one array conditionally. The parameter
-  // ORDER differs between the two branches, and that is exactly the kind of
-  // thing a shared array quietly gets wrong.
+  /*
+   * Two calls rather than one array built conditionally. The parameter ORDER
+   * differs between the branches, and that is exactly the kind of thing a
+   * shared array gets quietly wrong.
+   */
   const rows = categoryId
     ? all<ExpenseRow>(`${LIST_PAGE_SELECT_FILTERED} LIMIT ? OFFSET ?`, [
         categoryId,
@@ -88,23 +114,34 @@ export const listExpensePage = (
   return rows.map(toExpense);
 };
 
+/*
+ * The only place an id is generated in this app.
+ *
+ * TODO: must become a real UUID once a second device can create rows.
+ * Date.now() collides if two devices write inside the same millisecond and
+ * nothing here would notice.
+ */
+const newId = (prefix = ""): string =>
+  `${prefix}${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+/**
+ * Add an expense.
+ *
+ * @param categoryId Optional, and the default is a REAL row rather than NULL.
+ *   'uncategorised' already means "not sorted yet", so there is nothing NULL
+ *   would express that this does not. Keeping the column nullable-but-never-
+ *   null also avoids wanting NOT NULL, which SQLite cannot add to an existing
+ *   column without rebuilding the table — and a rebuild drops and recreates
+ *   every index on it.
+ */
 export const insertExpense = (
   title: string,
   amountMinor: Minor,
   currencyCode: string,
-  // Optional, and the default is a real row rather than NULL.
-  //
-  // 'uncategorised' already means "not sorted yet", so there is nothing
-  // NULL would express that this does not. Keeping the column nullable-but-
-  // never-null also avoids wanting NOT NULL, which SQLite cannot add to an
-  // existing column without rebuilding the table — and a rebuild would drop
-  // and recreate the two indexes 5g measured.
   categoryId: string = UNCATEGORISED_ID,
 ): Expense => {
   const expense: Expense = {
-    // TODO(Milestone 7): must become a real UUID once a second device
-    // can also create expenses. Fine while there's exactly one source of IDs.
-    id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    id: newId(),
     title,
     currencyCode,
     amountMinor,
@@ -112,19 +149,19 @@ export const insertExpense = (
   };
 
   run(
-    // category_id is passed EXPLICITLY rather than left to fall to NULL.
-    //
-    // The column is nullable with no default — SQLite forced that, because
-    // an added column carrying REFERENCES cannot have a non-NULL default.
-    // So omitting it would work, and would quietly produce a database where
-    // the migrated rows say 'uncategorised' and every row added afterwards
-    // says NULL. Two spellings of the same idea, both present, discovered
-    // in 5e as a confusing bug.
-    //
-    // currencyCode and categoryId are both strings and they are adjacent.
-    // Swapping them compiles. The foreign key on category_id is the only
-    // thing that catches it, which is why 5h verified it before touching
-    // this function.
+    /*
+     * category_id is passed EXPLICITLY rather than left to fall to NULL.
+     *
+     * The column is nullable with no default — SQLite forced that, because an
+     * added column carrying REFERENCES cannot have a non-NULL default. So
+     * omitting it here would work, and would quietly produce a database where
+     * migrated rows say 'uncategorised' and every row added afterwards says
+     * NULL. Two spellings of the same idea, both present.
+     *
+     * currencyCode and categoryId are both strings and they are adjacent.
+     * Swapping them compiles. The foreign key on category_id is the only
+     * thing that catches it.
+     */
     `INSERT INTO expenses (id, title, amount_minor, currency_code, created_at, category_id)
      VALUES (?, ?, ?, ?, ?, ?)`,
     [
@@ -139,48 +176,20 @@ export const insertExpense = (
 
   return expense;
 };
-// DEV ONLY. Asks SQLite how it INTENDS to answer the paging query.
-// EXPLAIN QUERY PLAN never executes the query, so this costs the same
-// at 50,000 rows as at 50.
-export const explainListPage = (): void => {
-  // Widened from number[] — the filtered query binds a string first.
-  const show = (label: string, sql: string, params?: (string | number)[]) => {
-    try {
-      const rows = all<Record<string, unknown>>(sql, params);
-      console.log(`--- plan (${label}) ---\n${JSON.stringify(rows, null, 2)}`);
-    } catch (err) {
-      console.log(`--- plan (${label}) FAILED ---`, String(err));
-    }
-  };
 
-  show("literal", `EXPLAIN QUERY PLAN ${LIST_PAGE_SELECT} LIMIT ${PAGE_SIZE} OFFSET 0`);
-
-  show("bound", `EXPLAIN QUERY PLAN ${LIST_PAGE_SELECT} LIMIT ? OFFSET ?`, [
-    PAGE_SIZE,
-    0,
-  ]);
-
-  // The 5f query, planned today with no index on category_id. Expect SCAN.
-  // That reading is half of a pair — 5g creates the index and runs this
-  // same function again. Taking it now means the "before" cannot be blamed
-  // on the SQL having changed in between.
-  show(
-    "bound + category filter",
-    `EXPLAIN QUERY PLAN ${LIST_PAGE_SELECT_FILTERED} LIMIT ? OFFSET ?`,
-    ["food", PAGE_SIZE, 0],
-  );
-};
-
-// COUNT and SUM are "aggregate" functions — they squash many rows
-// into one value. SQLite does the work internally, so no rows and
-// no objects ever cross into JavaScript.
-
+/**
+ * How many expenses and how much money, for the header.
+ *
+ * COUNT and SUM are aggregates — SQLite squashes many rows into one value
+ * internally, so no rows and no objects cross into JavaScript.
+ *
+ * @param categoryId Omit for every category. When given, the total MUST
+ *   narrow with it: a list showing one category above a total showing
+ *   everything is a screen that lies quietly.
+ */
 export const readTotals = (
   categoryId?: string,
 ): { count: number; totalMinor: Minor } => {
-  // This total MUST narrow with the filter. It is the number at the top of
-  // the screen and it is the reason 5f exists — a list showing only Food
-  // above a total showing everything is a screen that lies quietly.
   const rows = categoryId
     ? all<{ n: number; total: number | null }>(
         `SELECT COUNT(*) AS n, SUM(amount_minor) AS total
@@ -193,13 +202,15 @@ export const readTotals = (
        FROM expenses`,
       );
 
-  // COUNT(*) is correct here. There is no join, so no NULL-filled row can
-  // appear — the empty result is genuinely zero rows, not one blank one.\
-
+  /*
+   * COUNT(*) is correct here. There is no join, so no NULL-filled row can
+   * appear — an empty result is genuinely zero rows, not one blank one.
+   */
   const row = rows[0] ?? { n: 0, total: null };
   return {
     count: row.n,
-    // Filtering to rent hits this path for real: 0 rows, so SUM is NULL.
+    /* Filtering to an empty category hits this for real: SUM over zero rows
+     * is NULL, not 0. */
     totalMinor: asMinor(row.total ?? 0),
   };
 };
@@ -211,16 +222,18 @@ export type CategoryBreakdown = {
   totalMinor: Minor;
 };
 
-// Every category, with how many expenses are in it and how much money.
-//
-// Reads FROM categories and joins expenses onto it, rather than the other
-// way round. GROUP BY over expenses alone returns no row at all for rent,
-// because there is nothing there to group — 5e proved that. The sheet has
-// to show rent, so categories has to be the table being read.
-//
-// This query takes NO filter, and that is deliberate, not an omission.
-// Its job is to show you what you could switch to. Filtering it to the
-// current category would show that category and six zeroes.
+/**
+ * Every category, with how many expenses are in it and how much money.
+ *
+ * Reads FROM categories and joins expenses onto it, not the other way round.
+ * Grouping over expenses alone returns no row at all for an empty category,
+ * because there is nothing there to group. A breakdown has to show the empty
+ * ones, so categories has to be the table being read.
+ *
+ * Takes NO filter, and that is deliberate rather than an omission. Its job is
+ * to show what you could switch to. Filtering it would show one category and
+ * a column of zeroes.
+ */
 export const readCategoryBreakdown = (): CategoryBreakdown[] => {
   const rows = all<{
     id: string;
@@ -228,12 +241,19 @@ export const readCategoryBreakdown = (): CategoryBreakdown[] => {
     n: number;
     total: number | null;
   }>(
-    // COUNT(e.id), NOT COUNT(*).
-    //
-    // The LEFT JOIN still produces one row for rent, with every e.* column
-    // NULL. COUNT(*) counts rows and would report 1. COUNT(e.id) counts
-    // non-NULL values and reports 0. Nothing throws either way, so this is
-    // a wrong number on screen rather than a crash.
+    /*
+     * COUNT(e.id), NOT COUNT(*).
+     *
+     * The LEFT JOIN still produces one row for an empty category, with every
+     * e.* column NULL. COUNT(*) counts rows and would report 1. COUNT(e.id)
+     * counts non-NULL values and reports 0. Nothing throws either way, so
+     * this is a wrong number on screen rather than a crash.
+     *
+     * ORDER BY total DESC puts the biggest spend first. SQLite sorts NULL
+     * below everything, so empty categories land at the bottom on their own.
+     * c.id is the tiebreaker — two categories with equal totals must not swap
+     * places between reads.
+     */
     `SELECT c.id                AS id,
             c.name              AS name,
             COUNT(e.id)         AS n,
@@ -242,575 +262,577 @@ export const readCategoryBreakdown = (): CategoryBreakdown[] => {
        LEFT JOIN expenses e ON e.category_id = c.id
       GROUP BY c.id, c.name
       ORDER BY total DESC, c.id ASC`,
-    // ORDER BY total DESC puts the biggest spend first. SQLite sorts NULL
-    // below everything, so rent lands at the bottom on its own. c.id is the
-    // tiebreaker — two categories with equal totals must not swap places
-    // between reads.
   );
 
   return rows.map((r) => ({
     id: r.id,
     name: r.name,
     count: r.n,
-    // SUM over zero rows is NULL. Same rule as readTotals.
     totalMinor: asMinor(r.total ?? 0),
   }));
 };
 
-
 export type Category = { id: string; name: string };
 
-// The picker's read. No join, no aggregate, seven rows.
-//
-// This is NOT readCategoryBreakdown with the numbers ignored. That query
-// LEFT JOINs 50,022 expense rows to produce these same seven names, and it
-// orders by total DESC — correct for a report, wrong for a picker, because
-// the rows would move as spending changes.
-//
-// ORDER BY name is here for stability, not for looks. A picker whose rows
-// reorder between opens defeats muscle memory.
-//
-// Returns every category including 'uncategorised'. Whether a surface shows
-// that row is the surface's decision, not this query's.
+/**
+ * Every category, name and id only. The read a picker wants.
+ *
+ * This is NOT readCategoryBreakdown with the numbers ignored. That query
+ * LEFT JOINs the whole expenses table to produce these same names, and it
+ * orders by total — correct for a report, wrong for a picker, because the
+ * rows would move as spending changes.
+ *
+ * ORDER BY name is here for stability, not for looks. A picker whose rows
+ * reorder between opens defeats muscle memory.
+ *
+ * Returns every category including the uncategorised one. Whether a surface
+ * shows that row is the surface's decision, not this query's.
+ */
 export const readCategories = (): Category[] =>
   all<Category>(`SELECT id, name FROM categories ORDER BY name ASC`);
 
+/* ─── Category writes ──────────────────────────────────────────────────── */
 
-export const debugAmountTypes = () => {
+const CATEGORY_PREFIX = "cat-";
+
+/*
+ * categories.name is TEXT NOT NULL, and NOT NULL does not stop ''. An empty
+ * string is a value, so the constraint is satisfied and a blank category
+ * inserts cleanly — then renders as a row you cannot identify well enough to
+ * rename. This is the guard the schema is not able to be.
+ */
+const cleanCategoryName = (name: string): string => {
+  const clean = name.trim();
+  if (clean.length === 0) {
+    throw new Error("Category name cannot be empty.");
+  }
+  return clean;
+};
+
+/*
+ * COLLATE NOCASE because SQLite compares TEXT case-sensitively by default.
+ * Without it, 'Food' and 'food' are different names and both get in.
+ *
+ * This is a CHECK, not a CONSTRAINT, and the difference matters. A UNIQUE
+ * index would make duplicates impossible. This only makes them impossible
+ * through these functions. A real constraint is deferred because uniqueness
+ * will eventually be per user, and a global one added now would have to be
+ * dropped — which means rebuilding the table.
+ *
+ * Two queries rather than one carrying "AND id <> COALESCE(?, '')". Same
+ * reason the page query is held as two strings: a test the planner has to
+ * evaluate row by row is a test it cannot use an index for.
+ *
+ * @param excludeId Pass the row being renamed, so keeping its own name is
+ *   not treated as a clash with itself.
+ */
+const assertNameFree = (name: string, excludeId?: string): void => {
+  const rows = excludeId
+    ? all<{ n: number }>(
+        `SELECT COUNT(*) AS n
+           FROM categories
+          WHERE name = ? COLLATE NOCASE
+            AND id <> ?`,
+        [name, excludeId],
+      )
+    : all<{ n: number }>(
+        `SELECT COUNT(*) AS n
+           FROM categories
+          WHERE name = ? COLLATE NOCASE`,
+        [name],
+      );
+
+  if ((rows[0]?.n ?? 0) > 0) {
+    throw new Error(`A category called "${name}" already exists.`);
+  }
+};
+
+/**
+ * Create a category.
+ *
+ * Returns the row it created, so a screen can select it without re-reading.
+ *
+ * @throws If the name is blank or already taken, case-insensitively.
+ */
+export const insertCategory = (name: string): Category => {
+  const clean = cleanCategoryName(name);
+  assertNameFree(clean);
+
+  /*
+   * An opaque id, not a slug of the name.
+   *
+   * A slug would still say 'groceries' on a category renamed to 'Shopping',
+   * and two names that slugify alike would collide on the PRIMARY KEY. The id
+   * has to survive a rename. The name, by definition, does not.
+   *
+   * Prefixed so the id says where the row came from: a bare word was shipped
+   * by a migration, 'cat-...' was typed by the person using the app.
+   */
+  const category: Category = { id: newId(CATEGORY_PREFIX), name: clean };
+
+  run(`INSERT INTO categories (id, name) VALUES (?, ?)`, [
+    category.id,
+    category.name,
+  ]);
+
+  return category;
+};
+
+/**
+ * Rename a category.
+ *
+ * The uncategorised row is deliberately NOT blocked here. This writes `name`
+ * and leaves `id` alone, so the insert fallback and the delete target both
+ * keep working. Only deletion is blocked.
+ *
+ * @throws If the id does not exist, the name is blank, or the name is taken.
+ */
+export const renameCategory = (id: string, name: string): void => {
+  const clean = cleanCategoryName(name);
+
+  /*
+   * Read the row before writing. An UPDATE that matches nothing changes zero
+   * rows and throws nothing, so a stale id from a screen that has not
+   * refreshed would do absolutely nothing and look exactly like success.
+   */
+  const existing = all<{ id: string }>(
+    `SELECT id FROM categories WHERE id = ?`,
+    [id],
+  );
+  if (existing.length === 0) {
+    throw new Error(`No category with id "${id}".`);
+  }
+
+  assertNameFree(clean, id);
+
+  run(`UPDATE categories SET name = ? WHERE id = ?`, [clean, id]);
+};
+
+/**
+ * Delete a category, moving its expenses to the uncategorised row first.
+ *
+ * @returns How many expenses were moved.
+ * @throws If the id is the uncategorised row, or does not exist.
+ */
+export const deleteCategory = (id: string): number => {
+  /*
+   * Both halves of this guard are needed and neither is redundant.
+   *
+   * A management screen will not render a delete button on this row, which is
+   * the good experience. This throw stops a caller that does not have that
+   * screen's manners.
+   *
+   * Deleting this row would also remove the target the UPDATE below moves
+   * rows INTO, which fails as a foreign key error two lines later.
+   */
+  if (id === UNCATEGORISED_ID) {
+    throw new Error("The Uncategorised category cannot be deleted.");
+  }
+
+  const existing = all<{ id: string }>(
+    `SELECT id FROM categories WHERE id = ?`,
+    [id],
+  );
+  if (existing.length === 0) {
+    throw new Error(`No category with id "${id}".`);
+  }
+
+  const t0 = Date.now();
+  let moved = 0;
+
+  tx(() => {
+    /*
+     * Counted inside the transaction, so the number returned is the number
+     * the UPDATE on the next line actually moves.
+     *
+     * COUNT(*) rather than readTotals(id). readTotals also computes
+     * SUM(amount_minor), and amount_minor is not in the category index, so
+     * that sum costs a table lookup per row. A confirmation dialog wants the
+     * money. This does not.
+     */
+    const rows = all<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM expenses WHERE category_id = ?`,
+      [id],
+    );
+    moved = rows[0]?.n ?? 0;
+
+    /*
+     * THE ORDER OF THESE TWO STATEMENTS IS THE WHOLE FUNCTION.
+     *
+     * expenses.category_id REFERENCES categories(id) with no ON DELETE
+     * clause, so NO ACTION applies: SQLite refuses to remove a categories row
+     * while any expense still points at it. Enforcement is on, and tx() does
+     * not turn it off.
+     *
+     * Swap these and the DELETE throws FOREIGN KEY constraint failed, tx()
+     * rolls back, and nothing happens at all.
+     *
+     * Both parameters below are strings and they are adjacent. Swapped, this
+     * moves every uncategorised expense INTO the category being deleted, and
+     * then the DELETE fails on the foreign key. Loud, not silent.
+     */
+    run(`UPDATE expenses SET category_id = ? WHERE category_id = ?`, [
+      UNCATEGORISED_ID,
+      id,
+    ]);
+
+    run(`DELETE FROM categories WHERE id = ?`, [id]);
+  });
+
+  if (__DEV__) {
+    /*
+     * Timed here rather than from a dev button, because a button would time a
+     * different code path than the one a real tap runs.
+     *
+     * Every moved row also moves inside the index that leads with
+     * category_id. The created_at-only index does not contain the column and
+     * is untouched.
+     */
+    console.log(
+      `deleteCategory(${id}): moved ${moved} rows in ${Date.now() - t0}ms`,
+    );
+  }
+
+  return moved;
+};
+
+/* ─── Suggestion ───────────────────────────────────────────────────────── */
+
+/**
+ * The category most often used for this exact title, or null.
+ *
+ * A read that runs BEFORE a write, to decide what the write is told.
+ *
+ * MOST COMMON WINS, not most recent. One mis-tap no longer redirects a title
+ * you have categorised twenty times. The cost is the other side of the same
+ * coin: changing your mind takes as many taps as the old habit has rows.
+ *
+ * COLLATE NOCASE matches the comparison used when creating categories, and it
+ * is here because of real data: the same word gets typed with and without a
+ * capital and those should not be two separate titles. SQLite's NOCASE folds
+ * ASCII A-Z only — a title in any other script is compared byte for byte
+ * whatever this says.
+ *
+ * Excluding the uncategorised row is not an optimisation. A title whose
+ * expenses were never sorted has nothing to suggest, and offering
+ * "Uncategorised" would look like the app decided something when it did not.
+ * The exclusion runs BEFORE the grouping, so those rows never form a group.
+ *
+ * There is no index on `title`. At tens of thousands of rows this costs tens
+ * of milliseconds and runs once per title blur, which was measured and
+ * accepted. Add an index here if a title-based screen ever needs it.
+ */
+export const suggestCategory = (title: string): Category | null => {
+  const clean = title.trim();
+  /* An empty title would match any row that also has an empty title, and
+   * suggest whatever that row happens to hold. */
+  if (clean.length === 0) return null;
+
+  const t0 = Date.now();
+
+  const rows = all<{
+    id: string;
+    name: string;
+    n: number;
+    last_used: number;
+  }>(
+    /*
+     * GROUP BY c.id, c.name, not e.category_id alone. SQLite ALLOWS a bare
+     * column in an aggregate query and picks a value from some row in the
+     * group — naming both columns means nothing is being picked on our
+     * behalf.
+     *
+     * COUNT(*) is correct here, and this is the OPPOSITE of the rule in
+     * readCategoryBreakdown. That one LEFT JOINs, so an empty category still
+     * produces a row and COUNT(*) would report 1. This is an INNER JOIN — a
+     * group cannot exist unless it has rows.
+     *
+     * Three ORDER BY levels, and the last two are not decoration:
+     *   n DESC          the rule: most common wins
+     *   last_used DESC  on a tie, the more recently used one wins. That is
+     *                   the old newest-wins rule surviving exactly where
+     *                   counting cannot decide — including a brand new title,
+     *                   where every count is 1
+     *   c.id ASC        nothing can tie past this, so the same table always
+     *                   gives the same answer
+     */
+    `SELECT c.id   AS id,
+            c.name AS name,
+            COUNT(*)            AS n,
+            MAX(e.created_at)   AS last_used
+       FROM expenses e
+       JOIN categories c ON c.id = e.category_id
+      WHERE e.title = ? COLLATE NOCASE
+        AND e.category_id <> ?
+      GROUP BY c.id, c.name
+      ORDER BY n DESC, last_used DESC, c.id ASC
+      LIMIT 1`,
+    [clean, UNCATEGORISED_ID],
+  );
+
+  const top = rows[0];
+
+  if (__DEV__) {
+    /* The count is in the log for a reason. When a tap will not stick, this
+     * is the line that tells you how many rows you are arguing with. */
+    console.log(
+      `suggestCategory("${clean}"): ${
+        top ? `${top.name} x${top.n}` : "no match"
+      } in ${Date.now() - t0}ms`,
+    );
+  }
+
+  /* The count and last_used are for the log only. The caller gets a plain
+   * Category, so nothing upstream changes. */
+  return top ? { id: top.id, name: top.name } : null;
+};
+
+/* ─── Editing one expense ──────────────────────────────────────────────── */
+
+export type ExpenseForEdit = {
+  id: string;
+  title: string;
+  amountMinor: Minor;
+  currencyCode: string;
+  createdAt: number;
+  /*
+   * The whole category row, not just its id. An edit form renders the
+   * category's NAME, so returning only an id would force the form into a
+   * second query to turn it back into text.
+   *
+   * null means the row has no category at all, which the foreign key should
+   * make impossible. A form should treat it the same as uncategorised.
+   */
+  category: Category | null;
+};
+
+/**
+ * One expense with everything an edit form needs, read fresh when the form
+ * opens.
+ *
+ * This exists so the list page query never has to change. That query's text
+ * is fixed — the recorded list timings describe it character for character,
+ * and adding a column would make every one of those numbers describe
+ * something else.
+ *
+ * The price of reading here instead is one lookup by PRIMARY KEY, which
+ * SQLite answers by going straight to the row. The dev log below reports what
+ * that actually costs rather than assuming it is free.
+ *
+ * @returns null if no expense has that id.
+ */
+export const readExpenseForEdit = (id: string): ExpenseForEdit | null => {
+  const t0 = Date.now();
+
+  /*
+   * LEFT JOIN, not JOIN.
+   *
+   * category_id is nullable with no default, because SQLite refuses a
+   * non-NULL default on an added column carrying REFERENCES. insertExpense
+   * always passes a value, so a NULL should be impossible. If one existed, an
+   * INNER JOIN would return zero rows and the edit form would open blank with
+   * nothing thrown — a wrong screen rather than a crash.
+   */
   const rows = all<{
     id: string;
     title: string;
     amount_minor: number;
-    t: string;
     currency_code: string;
+    created_at: number;
+    category_id: string | null;
+    category_name: string | null;
   }>(
-    `SELECT id, title, amount_minor, typeof(amount_minor) AS t, currency_code
+    `SELECT e.id            AS id,
+            e.title         AS title,
+            e.amount_minor  AS amount_minor,
+            e.currency_code AS currency_code,
+            e.created_at    AS created_at,
+            e.category_id   AS category_id,
+            c.name          AS category_name
+       FROM expenses e
+       LEFT JOIN categories c ON c.id = e.category_id
+      WHERE e.id = ?`,
+    [id],
+  );
+
+  const row = rows[0];
+
+  if (__DEV__) {
+    console.log(
+      `readExpenseForEdit(${id}): ${
+        row ? "found" : "MISSING"
+      } in ${Date.now() - t0}ms`,
+    );
+  }
+
+  if (!row) return null;
+
+  return {
+    id: row.id,
+    title: row.title,
+    /* Same read boundary as the list. A stored float throws here, loudly. */
+    amountMinor: asMinor(row.amount_minor),
+    currencyCode: row.currency_code,
+    createdAt: row.created_at,
+    /*
+     * Both halves checked. An id with no name behind it would mean a row
+     * pointing at a deleted category, which the foreign key makes impossible
+     * — but null is the safe answer if it ever happens.
+     */
+    category:
+      row.category_id && row.category_name
+        ? { id: row.category_id, name: row.category_name }
+        : null,
+  };
+};
+
+/**
+ * Change an existing expense.
+ *
+ * `created_at` is deliberately NOT in the SET list. The expense happened when
+ * it happened. Fixing a typo in the amount must not move the row to the top
+ * of a list sorted by created_at, and it would also make every edit rewrite
+ * the row's position inside both created_at indexes.
+ *
+ * @throws If no expense has that id.
+ */
+export const updateExpense = (
+  id: string,
+  title: string,
+  amountMinor: Minor,
+  currencyCode: string,
+  categoryId: string = UNCATEGORISED_ID,
+): void => {
+  /*
+   * Read before writing, same guard and same reason as renameCategory. An
+   * UPDATE that matches nothing changes zero rows and throws nothing, so a
+   * stale id would do absolutely nothing and look exactly like success.
+   */
+  const existing = all<{ id: string }>(`SELECT id FROM expenses WHERE id = ?`, [
+    id,
+  ]);
+  if (existing.length === 0) {
+    throw new Error(`No expense with id "${id}".`);
+  }
+
+  run(
+    /*
+     * currencyCode and categoryId are adjacent strings — the same hazard
+     * insertExpense carries. Swapped, this writes a category id into
+     * currency_code, and the currency lookup throws the next time the row is
+     * formatted, on a different screen, long after the edit. The foreign key
+     * only catches the other half of the swap.
+     */
+    `UPDATE expenses
+        SET title = ?, amount_minor = ?, currency_code = ?, category_id = ?
+      WHERE id = ?`,
+    [title, amountMinor, currencyCode, categoryId, id],
+  );
+};
+
+
+/* ─── Deleting one expense, and putting it back ────────────────────────── */
+
+/**
+ * An expense as the list shows it, plus the one column the list query leaves
+ * out: its category.
+ *
+ * This is what undo holds between a delete and a restore. The list's own
+ * Expense is not enough — LIST_PAGE_SELECT does not select category_id, so a
+ * row rebuilt from it would come back with no category.
+ *
+ * categoryId allows null because the column does. Restore puts back exactly
+ * what was there, a NULL included, rather than tidying it on the way.
+ */
+export type DeletedExpense = Expense & { categoryId: string | null };
+
+/**
+ * Delete one expense, and hand back everything needed to undo it.
+ *
+ * This is a real DELETE. There is no deleted_at column, so once this returns,
+ * the object it returns is the only complete copy of the row anywhere.
+ * Whoever calls this holds that copy for as long as undo is on offer.
+ *
+ * @returns The row as it was, every column.
+ * @throws If no expense has that id.
+ */
+export const deleteExpense = (id: string): DeletedExpense => {
+  const t0 = Date.now();
+
+  /*
+   * Read before deleting, for two reasons.
+   *
+   * A DELETE that matches nothing removes zero rows and throws nothing, so a
+   * stale id would look exactly like success. Same guard as updateExpense.
+   *
+   * And this read IS the undo. After the DELETE below, there is nowhere left
+   * to read the row from.
+   *
+   * No transaction around the pair. all() and run() are synchronous, so no
+   * other code in the app can run between the read and the delete.
+   * deleteCategory needs tx() because it makes two writes; this makes one.
+   */
+  const rows = all<ExpenseRow & { category_id: string | null }>(
+    `SELECT id, title, amount_minor, currency_code, created_at, category_id
        FROM expenses
-      ORDER BY created_at DESC, id DESC
-      LIMIT 20`,
+      WHERE id = ?`,
+    [id],
   );
-  console.log(JSON.stringify(rows, null, 2));
-};
-
-// DEV ONLY. IF NOT EXISTS makes it safe to tap twice — nothing visible
-// happens when it works, so you will.
-export const createListIndex = (): void => {
-  const t0 = Date.now();
-  run(
-    // The column order matches the ORDER BY exactly: created_at first,
-    // id as the tiebreaker. An index only helps a sort it lines up with.
-    `CREATE INDEX IF NOT EXISTS idx_expenses_created_at_id
-       ON expenses (created_at DESC, id DESC)`,
-  );
-  // Building over 50,013 rows is not instant. Worth seeing the number.
-  console.log(`create index: ${Date.now() - t0}ms`);
-};
-
-// DEV ONLY. Safe because an index holds no data of its own — every
-// value in it is a copy of something still sitting in the table.
-export const dropListIndex = (): void => {
-  run(`DROP INDEX IF EXISTS idx_expenses_created_at_id`);
-  console.log("index dropped");
-};
-
-// DEV ONLY. Prints the whole row, not a field. The column name a PRAGMA
-// hands back is not something to assert from memory — that is the same
-// lesson the plan output taught, and it cost nothing to apply here.
-export const readUserVersion = (): void => {
-  const rows = all<Record<string, unknown>>(`PRAGMA user_version`);
-  console.log(`user_version -> ${JSON.stringify(rows)}`);
-};
-
-// ─── Dev only. Milestone 5d, verification. ────────────────────────────────
-// Run this AFTER migration 4 has landed. Three questions, and all three are
-// needed — each one is blind to something the others catch.
-export const verifyMigration4 = (): void => {
-  // Q1. Does the foreign key actually exist?
-  // PRAGMA table_info would NOT answer this. It lists columns, and foreign
-  // keys are not columns — they are stored separately. This is the only
-  // statement that can tell a real constraint from a comment in the schema.
-  console.log(
-    "foreign_key_list(expenses) ->",
-    JSON.stringify(
-      all<Record<string, unknown>>("PRAGMA foreign_key_list(expenses)"),
-      null,
-      2,
-    ),
-  );
-
-  // Q2. Does any row point at a category that does not exist?
-  // The full stocktake. Reads every one of the 50,013 rows. Zero rows back
-  // means clean — blank output IS the answer here.
-  const violations = all<Record<string, unknown>>("PRAGMA foreign_key_check");
-  console.log(
-    "foreign_key_check -> violations:",
-    violations.length,
-    JSON.stringify(violations),
-  );
-
-  // Q3. Did the backfill actually run?
-  // Q2 CANNOT answer this. A NULL foreign key means "no relationship", which
-  // is always valid, so foreign_key_check passes a table of 50,013 NULLs
-  // without a murmur. This is the question that catches a silent no-op.
-  console.log(
-    "rows with NULL category_id ->",
-    JSON.stringify(
-      all<Record<string, unknown>>(
-        "SELECT COUNT(*) AS n FROM expenses WHERE category_id IS NULL",
-      ),
-    ),
-  );
-  // Q4. What did the newest rows actually get?
-  // n=0 above is equally true if insertExpense works and if no expense was
-  // added at all. This separates them: a UI row's id is a bare timestamp,
-  // a seeded row's id starts with "seed-".
-  console.log(
-    "newest 3 rows ->",
-    JSON.stringify(
-      all<Record<string, unknown>>(
-        `SELECT id, title, category_id
-           FROM expenses
-          ORDER BY created_at DESC, id DESC
-          LIMIT 3`,
-      ),
-      null,
-      2,
-    ),
-  );
-};
-
-// ─── Dev only. Milestone 5d, step 0. ──────────────────────────────────────
-// Asks the database the four questions migration 4's shape depends on.
-// Each one is a fact we would otherwise be guessing at.
-export const probeForeignKeys = (): void => {
-  // Typed as an unknown record on purpose. Printing the whole row tells us the
-  // real column name instead of us asserting one and being wrong quietly.
-  const readFk = (label: string): void => {
-    const rows = all<Record<string, unknown>>("PRAGMA foreign_keys");
-    // JSON.stringify because React Native's console collapses nested objects
-    // to [Object] and we would learn nothing.
-    console.log(`fk ${label} ->`, JSON.stringify(rows));
-  };
-
-  console.log(
-    "sqlite_version ->",
-    JSON.stringify(
-      all<Record<string, unknown>>("SELECT sqlite_version() AS v"),
-    ),
-  );
-
-  // Q1. Does expo-sqlite hand us a connection with enforcement already on?
-  readFk("at open");
-
-  // Q2. Can we turn it on outside a transaction, and does the read agree?
-  // A PRAGMA write returns nothing, so it goes through run(), not all().
-  run("PRAGMA foreign_keys = ON");
-  readFk("after ON, outside tx");
-
-  // Q3. The question that decides where enforcement has to live.
-  // Turn it off first, so a reading of 1 inside the tx means the pragma
-  // actually did something rather than that it was already on.
-  run("PRAGMA foreign_keys = OFF");
-  readFk("after OFF, outside tx");
-  try {
-    tx(() => {
-      run("PRAGMA foreign_keys = ON");
-      const rows = all<Record<string, unknown>>("PRAGMA foreign_keys");
-      console.log("fk INSIDE tx ->", JSON.stringify(rows));
-    });
-  } catch (err) {
-    // Not an empty catch. If run() throws inside tx(), tx() rolls back and
-    // rethrows, and an unhandled throw here would silently skip Q4.
-    // "It threw" is a different answer from "it no-opped" and we want both.
-    console.log("fk INSIDE tx THREW ->", String(err));
-  }
-  readFk("after the tx closed");
-
-  // Q4. The real schema, read from the database instead of from a handoff file.
-  console.log(
-    "table_info(expenses) ->",
-    JSON.stringify(
-      all<Record<string, unknown>>("PRAGMA table_info(expenses)"),
-      null,
-      2,
-    ),
-  );
-
-  // Leave the connection in a known state. Safe to do unconditionally: this
-  // pragma is per connection and is never written to the database file, so a
-  // relaunch resets it regardless. That is why this is not a foot-gun the
-  // way rewindMigration3 is.
-  run("PRAGMA foreign_keys = ON");
-  readFk("restored at end");
-};
-
-const SEED_PREFIX = "seed-";
-
-// Title and category are paired here rather than cycled independently.
-// i % length over both arrays gave "Rickshaw" in Health — data that is
-// unreadable to browse and useless as a filter test.
-//
-// The category ids are validated against the database below. They are
-// not trusted just because they are written here.
-const FAKE_EXPENSES: ReadonlyArray<{ title: string; categoryId: string }> = [
-  { title: "Tea", categoryId: "food" },
-  { title: "Rickshaw", categoryId: "transport" },
-  { title: "Lunch", categoryId: "food" },
-  { title: "Groceries", categoryId: "food" },
-  { title: "Phone recharge", categoryId: "bills" },
-  { title: "Bus fare", categoryId: "transport" },
-  { title: "Snacks", categoryId: "food" },
-  { title: "Photocopy", categoryId: "study" },
-  { title: "Internet bill", categoryId: "bills" },
-  { title: "Medicine", categoryId: "health" },
-];
-
-// DEV ONLY. Note this does NOT reuse insertExpense — that function
-// owns the timestamp (Date.now()), and we need dates spread across a
-// year so the list isn't 5,000 rows from the same second.
-
-export const seedFakeExpenses = (count: number): void => {
-  const now = Date.now();
-  const YEAR_MS = 365 * 24 * 60 * 60 * 1000;
-
-  // Read the real category list, from the database, ONCE, before the loop.
-  // The database still decides which ids are real. The difference is that
-  // it now CHECKS the map instead of supplying it. A seeder that cannot
-  // fail is worse than one that throws — a silently-skipped migration 5
-  // would only show up in 5g as a measurement that means nothing.
-  const known = new Set(
-    all<{ id: string }>(`SELECT id FROM categories`).map((r) => r.id),
-  );
-  const missing = [...new Set(FAKE_EXPENSES.map((f) => f.categoryId))].filter(
-    (id) => !known.has(id),
-  );
-  if (missing.length > 0) {
-    throw new Error(
-      `seedFakeExpenses: these categories are not in the database: ${missing.join(", ")}. Has migration 5 run? Check user_version.`,
-    );
+  const row = rows[0];
+  if (!row) {
+    throw new Error(`No expense with id "${id}".`);
   }
 
-  console.log(`STARTING SEED 💫 ${count} rows across ${known.size} categories`);
+  run(`DELETE FROM expenses WHERE id = ?`, [id]);
 
-  tx(() => {
-    for (let i = 0; i < count; i++) {
-      // One lookup instead of two. Title and category can no longer drift.
-      const fake = FAKE_EXPENSES[i % FAKE_EXPENSES.length];
-      // 20 to 2000 taka, converted to paisa. asMinor proves it's whole,
-      // so the seeder cannot inject the float bug we fixed at 4a.
-      const amountMinor = asMinor(Math.round(20 + Math.random() * 1980) * 100);
-
-      run(
-        `INSERT INTO expenses (id, title, amount_minor, currency_code, created_at, category_id)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-        [
-          `${SEED_PREFIX}${i}-${now}`,
-          fake.title,
-          amountMinor,
-          DEFAULT_CURRENCY,
-          now - Math.floor(Math.random() * YEAR_MS),
-          fake.categoryId,
-        ],
-      );
-    }
-  });
-};
-
-export const clearSeedExpenses = (): void => {
-  const t0 = Date.now();
-  run(`DELETE FROM expenses WHERE id LIKE '${SEED_PREFIX}%'`);
-  console.log(`clear: ${Date.now() - t0}ms`);
-};
-
-// DEV ONLY. Milestone 5e, step 0. Read-only.
-//
-// clearSeedExpenses deletes by id prefix. Before we clear ~100,000 rows,
-// this asks what that prefix actually catches and what it leaves behind.
-// Every count of the surviving set so far came from a handoff file rather
-// than from a query, and the arithmetic does not close.
-export const countRowSources = (): void => {
-  // CASE turns a per-row test into a label, and GROUP BY counts each label.
-  // One pass over the table rather than two separate COUNT(*) queries.
-  console.log(
-    "row sources ->",
-    JSON.stringify(
-      all<Record<string, unknown>>(
-        `SELECT CASE WHEN id LIKE '${SEED_PREFIX}%' THEN 'seeded' ELSE 'kept' END AS bucket,
-                COUNT(*) AS n
-           FROM expenses
-          GROUP BY bucket`,
-      ),
-    ),
-  );
-
-  // The kept rows are the ones a clear will NOT remove, so we look at them
-  // instead of trusting a count of them. LIMIT 50 because if the count above
-  // is large the hypothesis is already dead and a flood adds nothing.
-  console.log(
-    "kept rows ->",
-    JSON.stringify(
-      all<Record<string, unknown>>(
-        `SELECT id, title, category_id
-           FROM expenses
-          WHERE id NOT LIKE '${SEED_PREFIX}%'
-          ORDER BY created_at DESC, id DESC
-          LIMIT 50`,
-      ),
-      null,
-      2,
-    ),
-  );
-
-  // The spread as it stands. This is the "before" half of a pair — one row
-  // back means one category, which is the state 5f and 5g cannot measure in.
-  console.log(
-    "by category ->",
-    JSON.stringify(
-      all<Record<string, unknown>>(
-        `SELECT category_id, COUNT(*) AS n
-           FROM expenses
-          GROUP BY category_id
-          ORDER BY n DESC`,
-      ),
-    ),
-  );
-};
-
-// DEV ONLY. Times page one against the deepest page in the table.
-// The page size is held constant at both offsets, so the only thing
-// that differs is how far into the sort SQLite has to reach.
-export const timePages = (): void => {
-  const { count } = readTotals();
-
-  // Read the real count instead of hardcoding an offset. A hardcoded
-  // number falls past the end of a smaller table, returns zero rows,
-  // and times as "fast" while measuring nothing.
-  const deep = Math.max(0, count - PAGE_SIZE);
-
-  const time = (label: string, offset: number) => {
-    const t0 = Date.now();
-    const rows = listExpensePage(offset);
+  if (__DEV__) {
+    /* Title and amount are in the line so a pasted log shows WHICH row went,
+     * not just that something did. */
     console.log(
-      `${label} | offset ${offset} | ${rows.length} rows | ${Date.now() - t0}ms`,
+      `deleteExpense(${id}): "${row.title}" ${row.amount_minor} in ${
+        Date.now() - t0
+      }ms`,
     );
-  };
+  }
 
-  console.log(`--- timing: ${count} rows, page size ${PAGE_SIZE} ---`);
-
-  // Each offset runs twice. Every number in this project so far has been
-  // a single reading, and single readings are what let a wrong sort cost
-  // survive two sessions. A second pass exposes warm-up effects.
-  time("page one ", 0);
-  time("deep page", deep);
-  time("page one ", 0);
-  time("deep page", deep);
+  /* toExpense is the list's own read boundary, so a stored float throws here
+   * instead of travelling into the undo copy. */
+  return { ...toExpense(row), categoryId: row.category_id };
 };
 
-
-// ─── Dev only. Milestone 5g. ──────────────────────────────────────────────
-//
-// Every candidate is created and dropped from a button rather than a
-// migration. 5g has to visit three index states and go back, and a
-// migration only goes forward. The winner earns a migration in a later
-// session; the losers never reach the schema at all.
-
-const IDX_CATEGORY = "idx_expenses_category_id";
-const IDX_CATEGORY_SORT = "idx_expenses_category_created_at_id";
-
-
-// Four categories, spanning the distribution deliberately. rent and food
-// are the two ends and neither is optional — a reading taken from one of
-// them alone supports two opposite conclusions depending on which you took.
-const TIMED_CATEGORIES = ["rent", "uncategorised", "health", "food"] as const;
-
-// DEV ONLY. Which indexes exist RIGHT NOW, read from the database.
-//
-// This is the only thing that can tell the three states apart. The timings
-// cannot: a slow number looks identical whether the index is genuinely
-// absent or whether you tapped create and something went wrong quietly.
-//
-// sqlite_master is SQLite's own catalogue of what is in the file. One row
-// per table, index, view and trigger.
-
-export const listIndexes = (): void => {
-  console.log(
-    "indexes on expenses ->",
-    JSON.stringify(
-      all<Record<string, unknown>>(
-        `SELECT name, sql
-           FROM sqlite_master
-          WHERE type = 'index' AND tbl_name = 'expenses'
-          ORDER BY name`,
-      ),
-      null,
-      2,
-    ),
-  );
-};
-// DEV ONLY. Candidate 1. Filter only.
-export const createCategoryIndex = (): void => {
+/**
+ * Put a deleted expense back, exactly as it was.
+ *
+ * Not insertExpense. That generates a new id and stamps created_at with the
+ * current time, so a row restored through it would come back as a different
+ * expense, dated now, at the top of the list.
+ *
+ * @throws If an expense with this id already exists.
+ */
+export const restoreExpense = (e: DeletedExpense): void => {
   const t0 = Date.now();
-  run(`CREATE INDEX IF NOT EXISTS ${IDX_CATEGORY} ON expenses (category_id)`);
-  // Build time is itself a result. A bigger index costs more here, and that
-  // cost is paid again on every insert for the life of the app.
-  console.log(`create ${IDX_CATEGORY}: ${Date.now() - t0}ms`);
-};
 
-
-// DEV ONLY. Candidate 2. Filter and sort in one index.
-export const createCategoryCompositeIndex = (): void => {
-  const t0 = Date.now();
   run(
-    // category_id FIRST, and that is not a style choice. An index is sorted
-    // left to right, so leading with category_id puts every food row in one
-    // contiguous block, and created_at is still descending INSIDE that
-    // block. Lead with created_at instead and the food rows scatter across
-    // the whole index — the sort survives, the filter does not.
-    `CREATE INDEX IF NOT EXISTS ${IDX_CATEGORY_SORT}
-       ON expenses (category_id, created_at DESC, id DESC)`,
+    /*
+     * A plain INSERT. Deliberately not INSERT OR REPLACE, and not an upsert.
+     *
+     * If this id is already in the table, the row has already been put back
+     * once. id is the PRIMARY KEY, so SQLite rejects the second attempt and
+     * throws — which is the outcome wanted. An upsert would accept it quietly
+     * and hide whatever called restore twice. probeExpenseDelete checks this.
+     *
+     * Same column order as insertExpense, with the same hazard: currencyCode
+     * and categoryId are adjacent strings, and swapping them still compiles.
+     * probeExpenseDelete reads every column back by name to catch it.
+     */
+    `INSERT INTO expenses (id, title, amount_minor, currency_code, created_at, category_id)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    [e.id, e.title, e.amountMinor, e.currencyCode, e.createdAt, e.categoryId],
   );
-  console.log(`create ${IDX_CATEGORY_SORT}: ${Date.now() - t0}ms`);
-};
 
-// DEV ONLY. Drops both candidates and nothing else.
-//
-// idx_expenses_created_at_id is deliberately NOT dropped here. It serves
-// the unfiltered list, it is the "before" state every filtered number is
-// compared against, and removing it would change what those numbers mean.
-export const dropCategoryIndexes = (): void => {
-  run(`DROP INDEX IF EXISTS ${IDX_CATEGORY}`);
-  run(`DROP INDEX IF EXISTS ${IDX_CATEGORY_SORT}`);
-  console.log("category index candidates dropped");
-};
-
-
-// DEV ONLY. The filtered plan, asked twice with different values bound.
-//
-// Identical SQL text both times. LIST_PAGE_SELECT_FILTERED is not touched;
-// only the bound parameter differs. If the two plans come back the same,
-// that is the planner saying it cannot tell 0 rows from 20,000 rows —
-// which it cannot, because ANALYZE has never run on this database.
-export const explainFilteredPlans = (): void => {
-  const show = (categoryId: string) => {
-    const rows = all<Record<string, unknown>>(
-      `EXPLAIN QUERY PLAN ${LIST_PAGE_SELECT_FILTERED} LIMIT ? OFFSET ?`,
-      [categoryId, PAGE_SIZE, 0],
-    );
+  if (__DEV__) {
     console.log(
-      `--- filtered plan (${categoryId}) ---\n${JSON.stringify(rows, null, 2)}`,
+      `restoreExpense(${e.id}): "${e.title}" in ${Date.now() - t0}ms`,
     );
-  };
-
-  show("food");
-  show("rent");
-};
-
-
-// DEV ONLY. Times the filtered page query across the distribution.
-export const timeFilteredPages = (): void => {
-  // Every count is read FIRST, before any timing runs.
-  //
-  // readTotals(id) touches exactly the rows the timed query is about to
-  // touch, so calling it immediately before a timing hands that timing a
-  // warm page cache. Worse, it warms by a different amount in each index
-  // state — which is the comparison this milestone exists to make. Doing
-  // all the counts up front puts the same distance between the warming
-  // read and every timed read.
-  const plan = TIMED_CATEGORIES.map((id) => {
-    const { count } = readTotals(id);
-    return { id, count, deep: Math.max(0, count - PAGE_SIZE) };
-  });
-
-  console.log(`--- filtered timing, page size ${PAGE_SIZE} ---`);
-
-  for (const { id, count, deep } of plan) {
-    const time = (label: string, offset: number) => {
-      const t0 = Date.now();
-      const rows = listExpensePage(offset, id);
-      console.log(
-        `${id.padEnd(14)}| ${label} | offset ${String(offset).padStart(5)} | ${String(rows.length).padStart(2)} rows | ${Date.now() - t0}ms`,
-      );
-    };
-
-    // rent and uncategorised both have fewer rows than one page, so their
-    // deep offset is 0 and the two labels below time the SAME query. Four
-    // readings of one thing, not two readings of two things.
-    console.log(`${id}: ${count} rows`);
-    time("page one ", 0);
-    time("deep page", deep);
-    time("page one ", 0);
-    time("deep page", deep);
   }
-};
-
-
-// ─── Dev only. Milestone 5h. ──────────────────────────────────────────────
-
-// Does the foreign key actually stop a dangling category_id on INSERT?
-//
-// probeForeignKeys answers "is the pragma on". This answers "does it bite",
-// which is a different question — enforcement being on does not by itself
-// prove this table's constraint is real.
-//
-// Nothing survives this function. The insert runs inside a transaction that
-// is thrown out on purpose, and the row is then counted and deleted by hand
-// rather than trusting the rollback to have happened.
-export const probeCategoryFkOnInsert = (): void => {
-  const probeId = `fkprobe-${Date.now()}`;
-  let accepted = false;
-
-  try {
-    tx(() => {
-      run(
-        `INSERT INTO expenses (id, title, amount_minor, currency_code, created_at, category_id)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-        [probeId, "FK probe", 1, DEFAULT_CURRENCY, Date.now(), "__no_such_category__"],
-      );
-      // Reaching this line IS the answer: the insert was accepted, which
-      // means nothing is enforcing the constraint. Set the flag first, then
-      // throw to unwind the transaction.
-      accepted = true;
-      throw new Error("rollback: probe only");
-    });
-  } catch (err) {
-    // Two different throws land here and they mean opposite things. The
-    // `accepted` flag tells them apart, not the message.
-    console.log("probe threw ->", String(err));
-  }
-
-  // Do not trust the rollback. Ask. This also makes the function safe if
-  // tx() turns out not to rethrow.
-  const left = all<{ n: number }>(
-    `SELECT COUNT(*) AS n FROM expenses WHERE id = ?`,
-    [probeId],
-  );
-  if ((left[0]?.n ?? 0) > 0) {
-    run(`DELETE FROM expenses WHERE id = ?`, [probeId]);
-    console.log("probe row SURVIVED the rollback and was deleted by hand");
-  }
-
-  console.log(
-    accepted
-      ? "FK NOT ENFORCED — a dangling category_id was accepted"
-      : "FK ENFORCED — the insert was rejected",
-  );
-};
-
-// How much does the picker save by not reusing the breakdown?
-// Each read runs twice and only the second is comparable — same rule as
-// timePages, for the same reason.
-export const timeCategoryReads = (): void => {
-  const time = (label: string, fn: () => unknown) => {
-    const t0 = Date.now();
-    const out = fn();
-    const ms = Date.now() - t0;
-    const n = Array.isArray(out) ? out.length : 0;
-    console.log(`${label.padEnd(10)}| ${n} rows | ${ms}ms`);
-  };
-
-  console.log("--- category reads ---");
-  time("breakdown", readCategoryBreakdown);
-  time("lookup", readCategories);
-  time("breakdown", readCategoryBreakdown);
-  time("lookup", readCategories);
 };
