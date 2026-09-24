@@ -46,9 +46,12 @@ export const MIGRATIONS: string[] = [
   //
   //   (a) CREATE the list before anything can refer to it.
   //   (b) INSERT the 'uncategorised' row BEFORE the backfill at (d).
-  //       50,013 rows are about to claim they belong to it. If the row
-  //       is missing, the first of those claims fails and the whole
-  //       transaction rolls back.
+  //       Every existing row is about to claim it belongs to it (50,013
+  //       when this first ran during development). If the row is missing,
+  //       the first of those claims fails and the whole transaction rolls
+  //       back. On a fresh install there are no rows, so nothing claims
+  //       it and the order cannot bite. It only matters on a phone that
+  //       already has data.  
   //   (c) The column is NULLABLE with no DEFAULT, and it HAS to be.
   //       SQLite forbids a non-NULL default on an added column that
   //       carries REFERENCES, whenever enforcement is on. currency_code
@@ -112,9 +115,10 @@ export const MIGRATIONS: string[] = [
   //   'uncategorised' is NOT re-inserted. It already exists from 3 -> 4,
   //   and inserting it again would throw on the primary key.
   //
-  //   No UPDATE on expenses. The 20 real rows stay uncategorised because
-  //   that is true — nobody has categorised them yet. The 100,000 seeded
-  //   rows are about to be deleted, so re-pointing them is wasted work.
+  //   No UPDATE on expenses. Existing rows stay uncategorised because that
+  //   is true — nobody has categorised them yet. When this first ran during
+  //   development, the rest were seeded test rows about to be deleted, so
+  //   re-pointing them was wasted work.
   //
   //   'rent' will hold zero seeded rows. That is deliberate: nothing in
   //   FAKE_TITLES is rent, and a category matching zero rows is the

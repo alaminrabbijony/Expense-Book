@@ -30,9 +30,15 @@ export default function CategorySheet({
   // component does that the picker does not.
   const [items, setItems] = useState<CategoryListItem[]>([]);
 
-  // Read when the sheet OPENS, not when it mounts. A Modal with
-  // visible={false} is still mounted, so mount-time would give you numbers
-  // from app launch — stale the moment you add an expense.
+    /*
+     Read when the sheet opens, not when it mounts.
+     On Android a hidden Modal renders nothing, so the list inside it
+     unmounts. This component does not: index.tsx keeps rendering it and
+     only flips `visible`. A mount-time read would run once at app launch,
+     and be stale the moment an expense is added. The `if (!visible)`
+     below is what makes it wait for the open. 
+     */
+
   useEffect(() => {
     if (!visible) return;
 

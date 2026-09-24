@@ -92,3 +92,17 @@ export const formatMoney = (amountMinor: Minor, currency: string): string => {
   const { digits, symbol } = info(currency);
   return symbol + (amountMinor / 10 ** digits).toFixed(digits);
 };
+
+// 4500 -> "45.00". The inverse of toMinor.
+//
+// NOT formatMoney. That returns "৳45.00", and the symbol has no business in
+// a TextInput that already has a ৳ rendered beside it — sanitizeAmount would
+// also strip it on the first keystroke, so the field would appear to lose a
+// character the moment you touched it.
+export const toInput = (
+  amountMinor: Minor,
+  currency: string
+): string => {
+  const {digits} = info(currency)
+  return (amountMinor / 10 ** digits).toFixed(digits)
+}
