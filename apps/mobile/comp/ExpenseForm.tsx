@@ -15,6 +15,7 @@ import {
 } from "@et/shared";
 import { useEffect, useRef, useState } from "react";
 import {
+  Keyboard,
   LayoutAnimation,
   Pressable,
   StyleSheet,
@@ -237,7 +238,10 @@ export default function ExpenseForm({
         style={styles.titleInput}
         value={title}
         onChangeText={setTitle}
-        onBlur={handleTitleBlur}
+                onBlur={handleTitleBlur}
+        // Typing and the list do not share the screen: a field taking focus
+        // closes the list, because the keyboard it brings would cover it.
+        onFocus={() => setPickerOpen(false)}
         placeholder="What for?"
         placeholderTextColor="#4A4F58"
         // "next", not "done". This key does not save — it moves to the
@@ -251,7 +255,9 @@ export default function ExpenseForm({
       <View style={styles.amountRow}>
         <Text style={styles.currency}>৳</Text>
         <TextInput
-          ref={amountRef}
+                    ref={amountRef}
+          // Same rule as the title field: focus closes the list.
+          onFocus={() => setPickerOpen(false)}
           style={styles.amountInput}
           value={amount}
           onChangeText={(t) => setAmount(sanitizeAmount(t, currencyCode))}
@@ -298,9 +304,20 @@ export default function ExpenseForm({
         ) : (
           // flex: 1 is not cosmetic. Without it this Pressable is only as
           // wide as the word, and the rest of the row is dead to taps.
-          <Pressable
+                    <Pressable
             style={styles.categoryLabel}
-            onPress={() => setPickerOpen((open) => !open)}
+            onPress={() => {
+              /*
+               * Opening the list sends the keyboard away. A Pressable never
+               * takes focus, so without this the title keeps it, the keyboard
+               * stays up, and the list and the button sit behind it.
+               *
+               * Blurring the title also runs handleTitleBlur, so the suggestion
+               * arrives as the list opens. A tap on a row still wins over it.
+               */
+              if (!pickerOpen) Keyboard.dismiss();
+              setPickerOpen((open) => !open);
+            }}
           >
             <Text style={category ? styles.categoryName : styles.categoryEmpty}>
               {category ? category.name : "Category"}
