@@ -1,5 +1,6 @@
 import { asMinor, DEFAULT_CURRENCY, type Minor } from "@et/shared";
 import { all, run, tx } from ".";
+import { bumpCategories, bumpExpenses } from "./changes";
 
 /**
  * The category row that must always exist.
@@ -173,6 +174,11 @@ export const insertExpense = (
       categoryId,
     ],
   );
+
+  /* After the INSERT, never before: an INSERT that threw changed nothing,
+   * so no screen should be told it did. The same rule holds for every
+   * bumpExpenses call in this file. */
+  bumpExpenses("insertExpense");
 
   return expense;
 };
@@ -375,6 +381,11 @@ export const insertCategory = (name: string): Category => {
     category.name,
   ]);
 
+  /* The categories screen holds the list it read. The add form can create a
+   * category while that screen sits mounted behind it, so this has to be
+   * announced. No expense row changed, so the expense number stays put. */
+  bumpCategories("insertCategory");
+
   return category;
 };
 
@@ -406,6 +417,8 @@ export const renameCategory = (id: string, name: string): void => {
   assertNameFree(clean, id);
 
   run(`UPDATE categories SET name = ? WHERE id = ?`, [clean, id]);
+
+  bumpCategories("renameCategory");
 };
 
 /**
@@ -478,6 +491,19 @@ export const deleteCategory = (id: string): number => {
 
     run(`DELETE FROM categories WHERE id = ?`, [id]);
   });
+
+  /*
+   * OUTSIDE tx(), after it returns. If either statement throws, tx() rolls
+   * both back and this line is never reached. Inside, a bump would announce
+   * a change that the rollback then undid.
+   *
+   * Both counters. The expense number moves even when `moved` is 0:
+   * deleting a category changes no row in an unfiltered list, but a list
+   * filtered to this category now points at an id that no longer exists.
+   * The category number moves because the category list lost a row.
+   */
+  bumpExpenses("deleteCategory");
+  bumpCategories("deleteCategory");
 
   if (__DEV__) {
     /*
@@ -728,6 +754,8 @@ export const updateExpense = (
       WHERE id = ?`,
     [title, amountMinor, currencyCode, categoryId, id],
   );
+
+  bumpExpenses("updateExpense");
 };
 
 
@@ -785,6 +813,8 @@ export const deleteExpense = (id: string): DeletedExpense => {
 
   run(`DELETE FROM expenses WHERE id = ?`, [id]);
 
+  bumpExpenses("deleteExpense");
+
   if (__DEV__) {
     /* Title and amount are in the line so a pasted log shows WHICH row went,
      * not just that something did. */
@@ -829,6 +859,8 @@ export const restoreExpense = (e: DeletedExpense): void => {
      VALUES (?, ?, ?, ?, ?, ?)`,
     [e.id, e.title, e.amountMinor, e.currencyCode, e.createdAt, e.categoryId],
   );
+
+  bumpExpenses("restoreExpense");
 
   if (__DEV__) {
     console.log(
