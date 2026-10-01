@@ -10,7 +10,7 @@ import {
   type Category,
 } from "@/db/expenses";
 import { DEFAULT_CURRENCY, formatMoney, type Minor } from "@et/shared";
-import { router, Stack } from "expo-router";
+import { router } from "expo-router";
 import { useState } from "react";
 import {
   ActivityIndicator,
@@ -27,6 +27,14 @@ import { SafeAreaView } from "react-native-safe-area-context";
 
 
 
+/*
+ * Which edges the SafeAreaView pads. Not the bottom: the tab bar below this
+ * screen already pads for the system navigation bar, and SafeAreaView pads
+ * by the whole window's insets, not its own position. The full reason is
+ * at SAFE_EDGES in comp/ExpenseListScreen.tsx.
+ */
+const SAFE_EDGES = ["top", "left", "right"] as const;
+
 // What the confirm modal needs to know. Read at the moment Delete is
 // tapped, not held for every row — readTotals(id) is a two-aggregate query
 // against an index that leads with category_id, so it is cheap on demand
@@ -39,9 +47,14 @@ type Pending = {
 };
 
 export default function Categories() {
-  // Read once at mount. Nothing else on the device writes to categories, so
-  // this screen is the only thing that can make its own list wrong — and it
-  // patches the list itself after every write.
+  // Read once at mount, and patched by this screen after its own writes.
+  //
+  // KNOWN ISSUE: this screen is a tab now, so it stays mounted while other
+  // screens run, and the add sheet's inline "new category" can write
+  // categories while this list sits behind it. A category made there does
+  // not appear here until the app restarts. The category counter in
+  // db/changes.ts exists for exactly this; this screen does not listen to
+  // it yet.
   const [items, setItems] = useState<Category[]>(() => readCategories());
 
   // The field's three pieces of state.
@@ -186,11 +199,13 @@ export default function Categories() {
   };
 
   return (
-    <SafeAreaView style={styles.screen}>
-           {/* Sets options for THIS route only. No _layout.tsx edit needed. */}
-      <Stack.Screen options={{ headerShown: false }} />
+    <SafeAreaView style={styles.screen} edges={SAFE_EDGES}>
+      {/* No header options here any more: the tab layout switches the
+          navigator's header off for every tab. */}
 
       <View style={styles.header}>
+        {/* In the tab bar, back means the first tab, Home: the tab router's
+            backBehavior is 'firstRoute' unless told otherwise. */}
         <Pressable onPress={() => router.back()} hitSlop={12}>
           <Text style={styles.back}>‹</Text>
         </Pressable>

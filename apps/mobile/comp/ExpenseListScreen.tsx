@@ -1,9 +1,9 @@
 import BottomSheet from "@/comp/BottomSheet";
 import CategorySheet, { type CategoryChoice } from "@/comp/CategorySheet";
 import ExpenseForm from "@/comp/ExpenseForm";
+import { onAddSheetRequested, requestAddSheet } from "@/comp/addSheet";
 import {
   deleteExpense,
-  insertExpense,
   listExpensePage,
   readCategories,
   readExpenseForEdit,
@@ -40,7 +40,7 @@ import {
 */
 import { asMinor, DEFAULT_CURRENCY, formatMoney, type Minor } from "@et/shared";
 import { getCalendars } from "expo-localization";
-import { router, Stack, useFocusEffect } from "expo-router";
+import { router, useFocusEffect } from "expo-router";
 import {
   memo,
   Profiler,
@@ -206,6 +206,32 @@ const DEFAULT_CATEGORY_ICON = "receipt-outline" as const;
 let rowAnimStartedAt: number | null = null;
 
 /*
+ * Which copy of this screen started that animation, for the same logs.
+ *
+ * Two tabs render this screen, and the module variables above are shared by
+ * both copies. Only one row animates at a time anywhere in the app, so one
+ * name is enough. deleteRow and undoDelete set it next to rowAnimStartedAt.
+ */
+type ScreenName = "home" | "all";
+let rowAnimScreen: ScreenName = "home";
+
+/*
+ * Dev log: how many copies of each screen have been built since the app
+ * started. A copy takes the next number when it is built and keeps it until
+ * it is thrown away.
+ *
+ * The number tells apart three things that otherwise print the same lines:
+ *
+ *   a rebuild     "[all] copy 1 unmounted", later "[all] copy 2 mounted"
+ *   a second      "[all] copy 2 mounted" with no "copy 1 unmounted" before
+ *   copy          it: two copies of All alive at the same time
+ *   a hot update  "copy 1 unmounted", then "copy 1 mounted" again. Same
+ *                 number, because a hot update keeps state and only re-runs
+ *                 the effects
+ */
+const copiesBuilt: Record<ScreenName, number> = { home: 0, all: 0 };
+
+/*
  * Dev log: how long after the tap one step of a row animation happened.
  *
  * Three steps are logged, so one slow number can be split into its parts:
@@ -218,7 +244,9 @@ let rowAnimStartedAt: number | null = null;
  */
 function logRowStep(step: string) {
   if (!__DEV__ || rowAnimStartedAt === null) return;
-  console.log(`row ${step} after ${Date.now() - rowAnimStartedAt}ms`);
+  console.log(
+    `[${rowAnimScreen}] row ${step} after ${Date.now() - rowAnimStartedAt}ms`,
+  );
 }
 
 /*
@@ -236,6 +264,9 @@ function logRowStep(step: string) {
  *
  * Time that passes between two lines and is not in `rendering` was spent
  * somewhere other than React calling the list's components.
+ *
+ * Each line starts with the copy's name — [home] or [all] — which arrives
+ * here as the Profiler's `id`.
  *
  * Each line also says how many ExpenseRows ran in that update, split in two:
  *
@@ -261,7 +292,7 @@ let rowsMounted = 0;
 let rowsReRendered = 0;
 
 function logListRender(
-  _id: string,
+  id: string,
   phase: "mount" | "update" | "nested-update",
   actualDuration: number,
 ) {
@@ -272,7 +303,7 @@ function logListRender(
 
   if (!__DEV__ || rowAnimStartedAt === null) return;
   console.log(
-    `list ${phase}: ${Math.round(actualDuration)}ms rendering, ` +
+    `[${id}] list ${phase}: ${Math.round(actualDuration)}ms rendering, ` +
       `rows ${mounted} mounted / ${reRendered} re-rendered, ` +
       `committed after ${Date.now() - rowAnimStartedAt}ms`,
   );
@@ -340,17 +371,25 @@ const UNDO_OUT = FadeOut.duration(200);
 const LIST_MOVE = LinearTransition.duration(200);
 
 /*
- * This screen draws its own top card, so the navigator's header — the white
- * bar that showed the route's file name, "index" — is switched off. The
- * categories route does the same.
+ * Which edges the SafeAreaView pads. NOT THE BOTTOM.
  *
- * Built once, here, and never written inline. expo-router's Stack.Screen
- * calls navigation.setOptions inside an effect that lists `options` as a
- * dependency (expo-router 6.0.24, build/views/Screen.js). An inline object
- * is a new object every render, so it would call setOptions after every
- * render of this screen. Same rule as ROW_OUT and memo's props.
+ * SafeAreaView pads by the insets of the nearest SafeAreaProvider, not by
+ * where the SafeAreaView itself sits (react-native-safe-area-context 5.6.2,
+ * SafeAreaView.kt: getSafeAreaInsets(providerView)). Inside the tabs, the
+ * nearest provider is expo-router's root one, which covers the whole window:
+ * the tab navigator does not add its own when one already exists
+ * (@react-navigation/elements, SafeAreaProviderCompat.tsx). So the bottom
+ * inset — the system navigation bar — would be padded here too, while the
+ * tab bar below this screen already pads for it. The result would be an
+ * empty strip between the list and the tab bar.
+ *
+ * Built once, here, for the same reason as ROW_OUT: one object for the life
+ * of the app, not a new array on every render.
+ *
+ * The navigator's own header is switched off for every tab in the tab
+ * layout (app/(tabs)/_layout.tsx), so this screen no longer sets it.
  */
-const SCREEN_OPTIONS = { headerShown: false };
+const SAFE_EDGES = ["top", "left", "right"] as const;
 
 /*
  * Tap feedback. Android shows a ripple; iOS has no ripple, so it dims
@@ -589,7 +628,40 @@ const insertInSortOrder = (list: Expense[], row: Expense): Expense[] => {
     : [...list.slice(0, at), row, ...list.slice(at)];
 };
 
-export default function Index() {
+/*
+ * Two tabs render this screen: Home with its top card, All expenses without
+ * it. Each tab is a SEPARATE COPY with its own rows, total, offset and undo
+ * window — which is why a write on one tab has to reach the other.
+ *
+ * `screen` names the copy at the start of every dev log line, [home] or
+ * [all]. Both copies print the same lines, and a line that cannot be traced
+ * to a copy proves nothing.
+ *
+ * `showTopCard` is the only visual difference. Without the card there is no
+ * total, no ⋯ and no filter, so `filter` stays null on All expenses.
+ */
+export default function ExpenseListScreen({
+  screen,
+  showTopCard,
+}: {
+  screen: ScreenName;
+  showTopCard: boolean;
+}) {
+  /*
+   * This copy's number, for the dev log above.
+   *
+   * Taken in a useState initialiser, which runs once per copy: a hot update
+   * keeps it, a rebuild gets a new one. Written as useState(n) instead, the
+   * ++ would run on every render and the numbers would jump.
+   */
+  const [copy] = useState(() => ++copiesBuilt[screen]);
+
+  useEffect(() => {
+    if (!__DEV__) return;
+    console.log(`[${screen}] copy ${copy} mounted`);
+    return () => console.log(`[${screen}] copy ${copy} unmounted`);
+  }, [screen, copy]);
+
   // How many rows we have already pulled out of the database.
   // A REF, not state — onEndReached can fire twice before React
   // redraws, and state would still be showing the old number.
@@ -610,7 +682,9 @@ export default function Index() {
   const [rows, setRows] = useState<Expense[]>(() => {
     const t0 = Date.now();
     const first = listExpensePage(0);
-    console.log(`first page: ${first.length} rows in ${Date.now() - t0}ms`);
+    console.log(
+      `[${screen}] first page: ${first.length} rows in ${Date.now() - t0}ms`,
+    );
     offsetRef.current = first.length;
     return first;
   });
@@ -670,8 +744,12 @@ export default function Index() {
    * and skips the render. So calling this on every resume costs nothing on
    * the days nothing changed.
    *
-   * Empty dependency list on purpose. Everything inside is either a module
-   * function or a setter, and none of them change between renders.
+   * Only `screen` in the dependency list. Everything else inside is a module
+   * function or a setter, and none of them change between renders. A copy's
+   * name never changes either, so this still runs once per copy.
+   *
+   * Each copy runs its own: two tabs mean two timers and two AppState
+   * listeners, which is why each line says which copy printed it.
    */
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | null = null;
@@ -705,7 +783,8 @@ export default function Index() {
        */
       if (__DEV__) {
         console.log(
-          `today check (${reason}): ${new Date(start).toDateString()}` +
+          `[${screen}] today check (${reason}): ` +
+            `${new Date(start).toDateString()}` +
             `${start !== lastStart ? " — changed" : ""}, ` +
             `clock ${formatClock(new Date(now), settings.clock24)}, ` +
             `24h ${settings.clock24}, ` +
@@ -726,7 +805,7 @@ export default function Index() {
 
     const sub = AppState.addEventListener("change", (state) => {
       /* Every state, so a missing "active" shows up as a missing line. */
-      if (__DEV__) console.log(`app state: ${state}`);
+      if (__DEV__) console.log(`[${screen}] app state: ${state}`);
       if (state === "active") refresh("app coming back");
     });
 
@@ -734,7 +813,7 @@ export default function Index() {
       if (timer !== null) clearTimeout(timer);
       sub.remove();
     };
-  }, []);
+  }, [screen]);
 
   // null means no filter. Holds the name too, so the header can show it
   // without a second lookup.
@@ -743,16 +822,14 @@ export default function Index() {
   const [formOpen, setFormOpen] = useState(false);
 
   /*
-   * The row being edited, or null when adding a new one.
+   * The row being edited, or null.
    *
-   * THIS IS THE DANGEROUS PIECE OF STATE ON THIS SCREEN. If it survives the
-   * sheet closing, the next tap on + opens a form pre-filled with the
-   * last row you edited, with a Save button. Typing a new expense over it and
-   * saving overwrites that row instead of adding anything.
+   * This screen's sheet ONLY EDITS. Adding moved to the one add sheet in the
+   * tab layout, so + never opens this sheet, and the old danger — + opening
+   * a form pre-filled with the last row you edited — cannot happen here.
    *
-   * Two places clear it: closeForm on the way out, openAdd on the way in.
-   * Only one of them has to be forgotten for the bug to come back, so both
-   * are here on purpose.
+   * openEdit sets it before the sheet shows. closeForm clears it on the way
+   * out, so a closed sheet never holds a row that may be deleted later.
    */
   const [editing, setEditing] = useState<ExpenseForEdit | null>(null);
 
@@ -836,16 +913,16 @@ export default function Index() {
    * `reason` exists only for the dev log, so every way of ending the window
    * leaves a line saying which one it was.
    *
-   * useCallback for the same reason as holdCopy. Its one dependency is
-   * holdCopy, which never changes, so this never changes either.
+   * useCallback for the same reason as holdCopy. Its dependencies are
+   * holdCopy and `screen`, and neither changes, so this never changes either.
    */
   const endUndoWindow = useCallback(
     (reason: string) => {
       if (!heldRef.current) return;
       holdCopy(null);
-      if (__DEV__) console.log(`undo window ended by ${reason}`);
+      if (__DEV__) console.log(`[${screen}] undo window ended by ${reason}`);
     },
-    [holdCopy],
+    [holdCopy, screen],
   );
 
   /*
@@ -875,10 +952,12 @@ export default function Index() {
   useEffect(() => {
     if (!__DEV__) return;
     const flag = offsetRef.current === rows.length ? "" : "  <-- MISMATCH";
-    console.log(`offset ${offsetRef.current} / rows ${rows.length}${flag}`);
+    console.log(
+      `[${screen}] offset ${offsetRef.current} / rows ${rows.length}${flag}`,
+    );
     /* Only prints while a row animation is in flight. See logRowStep. */
     logRowStep("list render done");
-  }, [rows]);
+  }, [rows, screen]);
 
   // Go back to page one and re-read the total, keeping whatever filter
   // is currently applied. Called after anything that changes the table.
@@ -907,7 +986,7 @@ export default function Index() {
   const applyFilter = (choice: CategoryChoice) => {
     /* Page one of a different set, with totals for a different filter. The
      * held row's position belonged to the list being thrown away, so undo
-     * would have nowhere honest to put it. addExpense ends up here too. */
+     * would have nowhere honest to put it. */
     endUndoWindow("applyFilter");
 
     const categoryId = choice?.id;
@@ -949,21 +1028,33 @@ export default function Index() {
   );
 
   /*
-   * Leaving the screen ends the undo window.
+   * Leaving the screen ends the undo window — and with tabs, switching tab
+   * IS leaving the screen. The effect runs when this copy gains focus, and
+   * the function it returns runs when it loses focus (expo-router 6.0.24,
+   * build/useFocusEffect.js: its 'focus' and 'blur' listeners).
    *
-   * /categories can delete the category the held row points at. Foreign
-   * keys are enforced, so a restore after coming back would throw. Today the
-   * only way off this screen goes through the ⋯ sheet, which ends the window
-   * first — this is the backstop for whatever route gets added next.
+   * Why it must end: the Categories tab can delete the category the held row
+   * points at. Foreign keys are enforced, so a restore after coming back
+   * would throw.
    *
-   * The function returned is the cleanup, and it runs when the screen loses
-   * focus. Empty dependencies, so it is created once. That is safe because
+   * While focused, this copy also listens for either + asking for the add
+   * sheet, and ends the window then — the same as opening the form always
+   * did. Only the copy on screen listens, so a + tapped on Home never ends
+   * the window of the All expenses copy.
+   *
+   * Empty dependencies, so it is created once. That is safe because
    * endUndoWindow only touches refs and a state setter, and neither changes
    * between renders.
    */
   useFocusEffect(
     useCallback(() => {
-      return () => endUndoWindow("leaving the screen");
+      const stopListening = onAddSheetRequested(() =>
+        endUndoWindow("openAdd"),
+      );
+      return () => {
+        stopListening();
+        endUndoWindow("leaving the screen");
+      };
     }, []),
   );
 
@@ -1016,14 +1107,6 @@ export default function Index() {
 
   /* ─── Opening and closing the form ──────────────────────────────────── */
 
-  const openAdd = () => {
-    endUndoWindow("openAdd");
-
-    // Clears any leftover edit target. See the comment on `editing`.
-    setEditing(null);
-    setFormOpen(true);
-  };
-
   /*
    * useCallback: a row prop, so it must keep its identity for ExpenseRow's
    * memo. It reads a module function, a ref, two setters and endUndoWindow —
@@ -1068,8 +1151,8 @@ export default function Index() {
 
   const closeForm = () => {
     /*
-     * Close the swiped row on the way out — after Save, after Add, and after
-     * dismissing the sheet without saving.
+     * Close the swiped row on the way out — after Save, and after dismissing
+     * the sheet without saving.
      *
      * saveEdit calls this AFTER its setRows, and that is still in time. React
      * applies state updates only once the whole handler has returned, so the
@@ -1084,27 +1167,6 @@ export default function Index() {
   };
 
   /* ─── Writes ────────────────────────────────────────────────────────── */
-
-  const addExpense = (
-    title: string,
-    amountMinor: Minor,
-    currency: string,
-    categoryId: string,
-  ) => {
-    insertExpense(title, amountMinor, currency, categoryId);
-
-    // Clear the filter instead of calling reload().
-    //
-    // Adding an expense while filtered to another category inserts a row you
-    // cannot see, the sheet closes, and nothing on screen moves. It looks
-    // broken and it is not.
-    //
-    // applyFilter(null) already resets the offset, replaces the rows and
-    // re-reads the total, so this is reload() plus dropping the filter.
-    applyFilter(null);
-
-    closeForm();
-  };
 
   /*
    * The edit write, and the three places it has to reach.
@@ -1183,7 +1245,9 @@ export default function Index() {
     closeForm();
   };
 
-  /* One handler for both modes. `editing` decides which write runs. Safe to
+  /* The sheet on this screen only edits; adding lives in the tab layout.
+   * `editing` is always set while this sheet is open — openEdit sets it before
+   * showing the sheet — so the early return is a guard, not a path. Safe to
    * read from state here for the same reason reload() reads `filter`: this
    * only runs from an event handler, after the render that set it. */
   const submitExpense = (
@@ -1192,11 +1256,8 @@ export default function Index() {
     currency: string,
     categoryId: string,
   ) => {
-    if (editing) {
-      saveEdit(editing, title, amountMinor, currency, categoryId);
-    } else {
-      addExpense(title, amountMinor, currency, categoryId);
-    }
+    if (!editing) return;
+    saveEdit(editing, title, amountMinor, currency, categoryId);
   };
 
   /* ─── Delete and undo ───────────────────────────────────────────────── */
@@ -1233,6 +1294,7 @@ export default function Index() {
       /* NOT setRows. The leavingId effect removes the row one render later,
        * after it has rendered once with `exiting` switched on. */
       rowAnimStartedAt = Date.now();
+      rowAnimScreen = screen;
       setLeavingId(copy.id);
 
       setTotals((t) => ({
@@ -1246,7 +1308,7 @@ export default function Index() {
       holdCopy(copy);
       draggedSinceDeleteRef.current = false;
     },
-    [endUndoWindow, holdCopy],
+    [endUndoWindow, holdCopy, screen],
   );
 
   /*
@@ -1282,6 +1344,7 @@ export default function Index() {
     /* Unlike exiting, one render is enough here. The row mounts in this
      * render, and `entering` is read at mount. */
     rowAnimStartedAt = Date.now();
+    rowAnimScreen = screen;
     setRestoredId(row.id);
 
     setRows((prev) => insertInSortOrder(prev, row));
@@ -1295,57 +1358,78 @@ export default function Index() {
   };
 
   return (
-    <SafeAreaView style={styles.screen}>
-      <Stack.Screen options={SCREEN_OPTIONS} />
+    <SafeAreaView style={styles.screen} edges={SAFE_EDGES}>
       {/* With the header gone, the clock and battery sit straight on the
           black page. The system draws them dark by default, which would be
           invisible here, so this asks for light ones. On Android below
           API 31 React Native sets the older SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
           from 31 up it uses WindowInsetsController. Both are covered. */}
       <StatusBar barStyle="light-content" />
-      {/* The top card: what is being shown, how much, and +. */}
-      <View style={styles.hero}>
-        <View style={styles.heroTop}>
-          {/* The 3-dot. When the week filter arrives it opens a small menu
-              first, and this becomes onPress={() => setMenuOpen(true)}. */}
+      {/* The top card: what is being shown, how much, and +. Home only.
+          All expenses gets a plain bar with a back button instead, like the
+          Categories screen. */}
+      {showTopCard ? (
+        <View style={styles.hero}>
+          <View style={styles.heroTop}>
+            {/* The 3-dot. When the week filter arrives it opens a small menu
+                first, and this becomes onPress={() => setMenuOpen(true)}. */}
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Filter by category"
+              android_ripple={RIPPLE_ON_LIGHT}
+              style={({ pressed }) => [styles.heroIconButton, iosPressed(pressed)]}
+              onPress={() => {
+                endUndoWindow("⋯ sheet");
+                setSheetOpen(true);
+              }}
+              hitSlop={12}
+            >
+              <Ionicons name="ellipsis-horizontal" size={20} color={INK} />
+            </Pressable>
+          </View>
+
+          {/* numberOfLines is what actually truncates. Without it a long
+              category name wraps to a second line and pushes the total down. */}
+          <Text style={styles.headerLabel} numberOfLines={1}>
+            {filter ? filter.name : "Spent Recently"}
+          </Text>
+
+          <Text style={styles.headerTotal}>
+            {formatMoney(totals.totalMinor, DEFAULT_CURRENCY)}
+          </Text>
+
+          {/* The add button. It asks the tab layout for its add sheet — the
+              same sheet the tab bar's + opens, so both buttons add the same
+              way. The undo window ends through this copy's
+              onAddSheetRequested listener (the leaving-the-screen effect). */}
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel="Filter by category"
-            android_ripple={RIPPLE_ON_LIGHT}
-            style={({ pressed }) => [styles.heroIconButton, iosPressed(pressed)]}
-            onPress={() => {
-              endUndoWindow("⋯ sheet");
-              setSheetOpen(true);
-            }}
-            hitSlop={12}
+            accessibilityLabel="Add expense"
+            android_ripple={RIPPLE}
+            style={({ pressed }) => [styles.heroAdd, iosPressed(pressed)]}
+            onPress={requestAddSheet}
           >
-            <Ionicons name="ellipsis-horizontal" size={20} color={INK} />
+            <Ionicons name="add" size={30} color="#FFFFFF" />
           </Pressable>
         </View>
-
-        {/* numberOfLines is what actually truncates. Without it a long
-            category name wraps to a second line and pushes the total down. */}
-        <Text style={styles.headerLabel} numberOfLines={1}>
-          {filter ? filter.name : "Spent Recently"}
-        </Text>
-
-        <Text style={styles.headerTotal}>
-          {formatMoney(totals.totalMinor, DEFAULT_CURRENCY)}
-        </Text>
-
-        {/* The add button. It used to float over the list; it lives in the
-            card now. openAdd is unchanged, so the undo window still ends
-            here, and the form still opens empty. */}
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Add expense"
-          android_ripple={RIPPLE}
-          style={({ pressed }) => [styles.heroAdd, iosPressed(pressed)]}
-          onPress={openAdd}
-        >
-          <Ionicons name="add" size={30} color="#FFFFFF" />
-        </Pressable>
-      </View>
+      ) : (
+        <View style={styles.bar}>
+          {/* In the tab bar, back means the first tab, Home: React
+              Navigation's tab router goes back with backBehavior
+              'firstRoute' unless told otherwise. */}
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Back"
+            onPress={() => router.back()}
+            hitSlop={12}
+          >
+            <Text style={styles.barBack}>‹</Text>
+          </Pressable>
+          <Text style={styles.barTitle}>All expenses</Text>
+          {/* Balances the back chevron so the title sits centred. */}
+          <View style={styles.barSpacer} />
+        </View>
+      )}
 
       {/* The undo row, shown for as long as a deleted row is held.
 
@@ -1386,7 +1470,7 @@ export default function Index() {
       <Animated.View layout={LIST_MOVE} style={styles.listArea}>
         {/* Dev-only timing for the list. See logListRender. In a release
           build this renders the list and nothing else. */}
-        <Profiler id="list" onRender={logListRender}>
+        <Profiler id={screen} onRender={logListRender}>
           <Animated.FlatList
             style={{ flex: 1 }}
             data={rows}
@@ -1604,11 +1688,7 @@ export default function Index() {
         }}
       />
 
-      <BottomSheet
-        visible={formOpen}
-        title={editing ? "Edit expense" : "New expense"}
-        onClose={closeForm}
-      >
+      <BottomSheet visible={formOpen} title="Edit expense" onClose={closeForm}>
         {/*
           key forces a fresh mount whenever the target changes.
 
@@ -1618,9 +1698,9 @@ export default function Index() {
           correct even if the sheet ever stops unmounting.
         */}
         <ExpenseForm
-          key={editing?.id ?? "new"}
+          key={editing?.id}
           initial={editing}
-          submitLabel={editing ? "Save" : "Add expense"}
+          submitLabel="Save"
           onSubmit={submitExpense}
         />
       </BottomSheet>
@@ -1700,6 +1780,20 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     overflow: "hidden",
   },
+
+  // YOURS TO RESTYLE — the All expenses bar. Copied from the Categories
+  // screen's header, so the two read as the same kind of screen.
+  bar: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingHorizontal: 20,
+    paddingTop: 16,
+    paddingBottom: 12,
+  },
+  barBack: { color: "#ECEDEE", fontSize: 30, fontWeight: "300", marginTop: -6 },
+  barTitle: { color: "#FFFFFF", fontSize: 20, fontWeight: "700" },
+  barSpacer: { width: 18 },
 
   // YOURS TO RESTYLE — the undo row. The same card shape as an expense.
   undoRow: {

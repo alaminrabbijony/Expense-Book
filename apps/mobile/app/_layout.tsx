@@ -27,6 +27,20 @@ Ionicons.loadFont()
     if (__DEV__) console.warn("icon font failed to preload", e);
   });
 
+/*
+ * The root Stack holds one screen: the (tabs) group. Every screen inside it
+ * draws its own top, so the Stack's header is switched off here, once.
+ * Without this, the Stack draws its own header bar above the tabs, the same
+ * kind of bar the list screen used to hide for itself.
+ *
+ * The Stack stays, rather than becoming a plain Slot, so that a screen can
+ * later be pushed on top of the tabs.
+ *
+ * Module level, like every options object in this app: one object for the
+ * life of the app, never a new one per render.
+ */
+const STACK_OPTIONS = { headerShown: false };
+
 export default function RootLayout() {
   return (
     // No style prop, on purpose.
@@ -48,7 +62,7 @@ export default function RootLayout() {
 
           No props. The library detects edge-to-edge by itself. */}
       <KeyboardProvider>
-        <Stack />
+        <Stack screenOptions={STACK_OPTIONS} />
       </KeyboardProvider>
     </GestureHandlerRootView>
   );
