@@ -1,5 +1,5 @@
-
 import CategoryManageList from "@/comp/CategoryManageList";
+import { categoryVersion, onCategoriesChanged } from "@/db/changes";
 import {
   deleteCategory,
   insertCategory,
@@ -10,8 +10,8 @@ import {
   type Category,
 } from "@/db/expenses";
 import { DEFAULT_CURRENCY, formatMoney, type Minor } from "@et/shared";
-import { router } from "expo-router";
-import { useState } from "react";
+import { router, useFocusEffect } from "expo-router";
+import { useCallback, useRef, useState } from "react";
 import {
   ActivityIndicator,
   LayoutAnimation,
@@ -47,15 +47,46 @@ type Pending = {
 };
 
 export default function Categories() {
-  // Read once at mount, and patched by this screen after its own writes.
-  //
-  // KNOWN ISSUE: this screen is a tab now, so it stays mounted while other
-  // screens run, and the add sheet's inline "new category" can write
-  // categories while this list sits behind it. A category made there does
-  // not appear here until the app restarts. The category counter in
-  // db/changes.ts exists for exactly this; this screen does not listen to
-  // it yet.
-  const [items, setItems] = useState<Category[]>(() => readCategories());
+  /*
+   * The category version this list was read at.
+   *
+   * db/changes.ts adds 1 to the category version after every category write,
+   * anywhere in the app. When this number is behind that one, `items` is
+   * older than the database.
+   *
+   * Set in two kinds of place, the same as in comp/ExpenseListScreen.tsx:
+   *
+   *   a fresh read     the initialiser below, and readFresh in the focus
+   *                    effect.
+   *   this screen's    save (add and rename) and confirmDelete. Each one
+   *   own write        updates `items` itself straight after its write, so
+   *                    the new version is already shown. Marked seen inside
+   *                    the handler, so the listener — told in a microtask,
+   *                    after the handler returns — finds nothing to do.
+   *
+   * A ref, not state: nothing draws it, and the focus effect is created once,
+   * so it must read the current value rather than the first render's.
+   */
+  const seenRef = useRef(0);
+
+  /*
+   * The list, read at mount and kept fresh in three ways:
+   *
+   *   this screen's own writes   patch or re-read it themselves (save,
+   *                              confirmDelete)
+   *   a write while this tab     the listener below re-reads. The add
+   *   is on screen               sheet's inline "new category" can write
+   *                              while this list sits under the sheet.
+   *   a write while this tab     the focus check below re-reads once, when
+   *   is hidden                  this tab comes back
+   */
+  const [items, setItems] = useState<Category[]>(() => {
+    const first = readCategories();
+    /* Read in the same synchronous step as the list, so no write can land
+     * between the two. */
+    seenRef.current = categoryVersion();
+    return first;
+  });
 
   // The field's three pieces of state.
   //
@@ -77,6 +108,64 @@ export default function Categories() {
 
   const [pending, setPending] = useState<Pending | null>(null);
   const [busy, setBusy] = useState(false);
+
+  /*
+   * Keeps `items` true while this tab stays mounted. Two moments:
+   *
+   *   on focus       the version moved while this tab was hidden — for
+   *                  example a category made in the add sheet on Home.
+   *                  Re-read once.
+   *   while focused  listen. A category made in the add sheet opened from
+   *                  this tab's + lands while this list is on screen.
+   *                  Re-read when the version is not this screen's own.
+   *
+   * A re-read sorts the list by name. That is safe here because neither
+   * moment happens under a finger on this list: the first is a tab switch,
+   * the second happens while the add sheet covers the list.
+   *
+   * This screen holds no expense money — the delete dialog reads readTotals
+   * fresh when Delete is tapped — so it does not listen to the expense
+   * counter.
+   *
+   * Empty dependencies: created once. Safe because readFresh only uses
+   * readCategories, a setter and a ref — no state.
+   *
+   * The dev lines print every time, including "up to date" and "own write",
+   * so a check that never ran cannot look like one that ran and found
+   * nothing.
+   */
+  useFocusEffect(
+    useCallback(() => {
+      const readFresh = () => {
+        setItems(readCategories());
+        seenRef.current = categoryVersion();
+      };
+
+      const version = categoryVersion();
+      const seen = seenRef.current;
+      const stale = version !== seen;
+      if (__DEV__) {
+        console.log(
+          `[categories] check: version ${version}, seen ${seen} → ` +
+            (stale ? "re-read" : "up to date"),
+        );
+      }
+      if (stale) readFresh();
+
+      return onCategoriesChanged(() => {
+        const version = categoryVersion();
+        const seen = seenRef.current;
+        const own = version === seen;
+        if (__DEV__) {
+          console.log(
+            `[categories] heard: version ${version}, seen ${seen} → ` +
+              (own ? "own write, nothing" : "re-read"),
+          );
+        }
+        if (!own) readFresh();
+      });
+    }, []),
+  );
 
    // Every layout change on this screen goes through here. configureNext
   // applies to the NEXT render only, so it has to be called immediately
@@ -125,16 +214,22 @@ export default function Categories() {
         // row that is already under your finger, so re-sorting is safe here
         // in a way it is not after a rename.
         setItems(readCategories());
+        seenRef.current = categoryVersion();
       } else {
         const id = editId;
         renameCategory(id, draft);
+        /* Own write. Marked seen BEFORE the listener runs, so the listener
+         * does not re-read — a re-read would sort, and move this row. */
+        seenRef.current = categoryVersion();
 
         // Patch the one row instead of re-reading.
         //
         // readCategories sorts by name, so a re-read would move the row you
         // just edited to a new position — Food becoming Zomato jumps to the
-        // bottom of the list under your finger. The next time this screen
-        // mounts it reads fresh and sorted.
+        // bottom of the list under your finger. The row stays where it is
+        // until the list is next re-read: another category write anywhere,
+        // or an app restart. This tab stays mounted, so a tab switch alone
+        // does not re-read it.
         //
         // .trim() mirrors what cleanCategoryName already did to the value
         // that reached the database. Skip it and the screen shows "Food "
@@ -183,6 +278,10 @@ export default function Categories() {
       try {
         deleteCategory(id);
         setItems(readCategories());
+        /* Own write, already re-read on the line above. deleteCategory
+         * bumps the expense counter too; the list screens catch that on
+         * their own focus check. */
+        seenRef.current = categoryVersion();
         // The deleted row may be the one loaded into the field.
         if (editId === id) {
           setOpen(false);

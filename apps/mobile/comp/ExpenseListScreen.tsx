@@ -2,6 +2,7 @@ import BottomSheet from "@/comp/BottomSheet";
 import CategorySheet, { type CategoryChoice } from "@/comp/CategorySheet";
 import ExpenseForm from "@/comp/ExpenseForm";
 import { onAddSheetRequested, requestAddSheet } from "@/comp/addSheet";
+import { expenseVersion, onExpensesChanged } from "@/db/changes";
 import {
   deleteExpense,
   listExpensePage,
@@ -668,6 +669,30 @@ export default function ExpenseListScreen({
   const offsetRef = useRef(0);
 
   /*
+   * The expense version this copy's rows were read at.
+   *
+   * db/changes.ts adds 1 to the expense version after every expense write,
+   * anywhere in the app. When this number is behind that one, the rows on
+   * this screen are older than the database.
+   *
+   * Set in exactly two kinds of place:
+   *
+   *   a fresh read    the first page below, applyFilter and reload. The rows
+   *                   now match the database, whatever the version is.
+   *   this copy's     deleteRow, undoDelete and saveEdit. Each one patches
+   *   own write       the screen by hand straight after its write, so the
+   *                   new version is already shown. Marking it seen inside
+   *                   the handler is what makes the listener below find
+   *                   nothing to do — the listener is only told in a
+   *                   microtask, after the handler has returned.
+   *
+   * A ref, not state: nothing on screen draws it, and the listener and the
+   * focus check must read the current value, not the one from the render that
+   * created them.
+   */
+  const seenRef = useRef(0);
+
+  /*
    * The row that is currently swiped open, so something else can close it.
    *
    * A ref, not state. Nothing re-renders when this changes — closing is done
@@ -686,6 +711,9 @@ export default function ExpenseListScreen({
       `[${screen}] first page: ${first.length} rows in ${Date.now() - t0}ms`,
     );
     offsetRef.current = first.length;
+    /* Read in the same synchronous step as the page, so no write can land
+     * between the two. */
+    seenRef.current = expenseVersion();
     return first;
   });
 
@@ -959,15 +987,19 @@ export default function ExpenseListScreen({
     logRowStep("list render done");
   }, [rows, screen]);
 
-  // Go back to page one and re-read the total, keeping whatever filter
-  // is currently applied. Called after anything that changes the table.
-  //
-  // KNOWN ISSUE: nothing calls this while the dev row is commented out. Its
-  // only callers were Seed 50k and Clear seed. Kept, because it is the
-  // screen's one full re-read and the next bulk write will need it.
-  //
-  // Safe to read `filter` from state here: reload only ever runs from an
-  // event handler, after the render that set it.
+  /*
+   * Go back to page one and re-read the total, KEEPING the filter.
+   *
+   * Its caller is the focus check below: this copy comes back into focus and
+   * the expense version moved while it was hidden. A write on another tab is
+   * the only way that happens.
+   *
+   * It reads `filter` from state. That is only safe where the copy of reload
+   * being called was made in a render that already had the current filter —
+   * see the focus check for why that holds there. Do not call it from a
+   * listener made once with [] dependencies: that listener's reload would
+   * keep the filter from the first render forever.
+   */
   const reload = () => {
     // The list the held row's position belonged to is about to be replaced.
     endUndoWindow("reload");
@@ -976,6 +1008,7 @@ export default function ExpenseListScreen({
 
     const first = listExpensePage(0, categoryId);
     offsetRef.current = first.length;
+    seenRef.current = expenseVersion();
     setRows(first);
     setTotals(readTotals(categoryId));
   };
@@ -983,6 +1016,12 @@ export default function ExpenseListScreen({
   // Switch filter. Takes the choice as an ARGUMENT, never from state —
   // setFilter below does not update `filter` until the next render, so
   // reading it back here would apply the previous tap's category.
+  //
+  // It reads NO state at all: only its argument, refs, setters, module
+  // functions and endUndoWindow, which never changes. That is what makes it
+  // safe to call from the change listener below, which is created once and
+  // keeps the first render's copy of this function. If this function ever
+  // starts reading state, that listener silently uses the old value.
   const applyFilter = (choice: CategoryChoice) => {
     /* Page one of a different set, with totals for a different filter. The
      * held row's position belonged to the list being thrown away, so undo
@@ -996,6 +1035,7 @@ export default function ExpenseListScreen({
     // switching from one category to another asks for rows 300-350 of a set
     // with none.
     offsetRef.current = first.length;
+    seenRef.current = expenseVersion();
     // REPLACE, never append. Appending leaves one category's rows above
     // another's.
     setRows(first);
@@ -1007,52 +1047,126 @@ export default function ExpenseListScreen({
     setSheetOpen(false);
   };
 
-  // The only thing on this screen that a trip to /categories can break.
-  //
-  // CategorySheet re-reads on [visible], so its numbers look after
-  // themselves. This state does not — delete the filtered category over
-  // there and `filter` still holds an id with no row behind it. The list
-  // then returns 0 rows and readTotals returns ৳0, both correct, while the
-  // header still names the category. Nothing throws and nothing logs.
-  //
-  // useFocusEffect runs every time this screen becomes the visible one,
-  // where useEffect with [] would only run once at mount. useCallback is
-  // required — without it the callback is a new function every render and
-  // the effect re-runs forever.
-  useFocusEffect(
-    useCallback(() => {
-      if (!filter) return;
-      const stillThere = readCategories().some((c) => c.id === filter.id);
-      if (!stillThere) applyFilter(null);
-    }, [filter]),
-  );
-
   /*
-   * Leaving the screen ends the undo window — and with tabs, switching tab
-   * IS leaving the screen. The effect runs when this copy gains focus, and
-   * the function it returns runs when it loses focus (expo-router 6.0.24,
-   * build/useFocusEffect.js: its 'focus' and 'blur' listeners).
+   * The check a copy runs when it comes back into focus: is what I show
+   * still true? Two ways it can be wrong after time on another tab.
    *
-   * Why it must end: the Categories tab can delete the category the held row
-   * points at. Foreign keys are enforced, so a restore after coming back
-   * would throw.
+   *   1. The filtered category was deleted on Categories. `filter` still
+   *      holds an id with no row behind it. The list would return 0 rows and
+   *      ৳0, both correct, under a header naming a category that is gone.
+   *      → applyFilter(null), and STOP. reload would read `filter` from
+   *      state, which still holds the dead category until the next render.
    *
-   * While focused, this copy also listens for either + asking for the add
-   * sheet, and ends the window then — the same as opening the form always
-   * did. Only the copy on screen listens, so a + tapped on Home never ends
-   * the window of the All expenses copy.
+   *   2. The expense version moved while this copy was hidden: an add from
+   *      the + on another tab, a delete or edit on the other list, or a
+   *      category delete that moved rows. → reload(), which keeps the filter.
    *
-   * Empty dependencies, so it is created once. That is safe because
-   * endUndoWindow only touches refs and a state setter, and neither changes
-   * between renders.
+   * WHEN THIS RUNS. Every time this copy becomes focused, AND every time
+   * `filter` changes while it is focused. useFocusEffect re-runs its
+   * callback whenever the callback itself changes and the screen is focused
+   * (expo-router 6.0.24, build/useFocusEffect.js, `if
+   * (navigation.isFocused())` inside a useEffect on [effect]), and
+   * useCallback rebuilds it when `filter` changes. After a ⋯ tap that
+   * second run finds nothing to do, because applyFilter has just marked the
+   * version seen. That is why the dev line says "check", not "focus".
+   *
+   * WHY reload SEES THE CURRENT FILTER HERE. The callback is rebuilt every
+   * time `filter` changes, and each rebuild holds the reload from that same
+   * render. So the reload it calls always read the filter that is current.
+   * applyFilter and reload are deliberately NOT in the dependency list: both
+   * are new functions on every render, and listing them would re-run this
+   * check on every render while focused.
+   *
+   * The dev line prints on every run, including "up to date", so a check
+   * that never ran cannot look like one that ran and found nothing.
    */
   useFocusEffect(
     useCallback(() => {
-      const stopListening = onAddSheetRequested(() =>
+      if (filter && !readCategories().some((c) => c.id === filter.id)) {
+        if (__DEV__) {
+          console.log(
+            `[${screen}] check: filtered category gone → show all`,
+          );
+        }
+        applyFilter(null);
+        return;
+      }
+
+      const version = expenseVersion();
+      const seen = seenRef.current;
+      const stale = version !== seen;
+      if (__DEV__) {
+        console.log(
+          `[${screen}] check: version ${version}, seen ${seen} → ` +
+            (stale ? "reload" : "up to date"),
+        );
+      }
+      if (stale) reload();
+    }, [filter, screen]),
+  );
+
+  /*
+   * While focused, this copy listens. Leaving the screen stops it, and ends
+   * the undo window — and with tabs, switching tab IS leaving the screen.
+   * The effect runs when this copy gains focus, and the function it returns
+   * runs when it loses focus (expo-router 6.0.24, build/useFocusEffect.js:
+   * its 'focus' and 'blur' listeners).
+   *
+   * Why the undo window must end: the Categories tab can delete the category
+   * the held row points at. Foreign keys are enforced, so a restore after
+   * coming back would throw.
+   *
+   * Two things are listened to:
+   *
+   *   either + asking for the add sheet
+   *       ends the undo window, the same as opening the form always did.
+   *
+   *   the expense version moving
+   *       Told in a microtask, after the writing handler has returned. If the
+   *       write was this copy's own, its handler has already marked the
+   *       version seen, and this finds nothing to do.
+   *
+   *       Any other expense write while this copy is focused is an add from
+   *       a +. Every other expense write in the app either happens in this
+   *       copy (deleteRow, undoDelete, saveEdit) or on another tab, and
+   *       reaching another tab blurs this one first. So the answer is what
+   *       the add always did on the screen it was made from: clear this
+   *       copy's filter and show page one, where the new row sits on top.
+   *
+   *       If that reasoning is ever wrong, nothing shows wrong money:
+   *       applyFilter(null) re-reads everything. The only cost is a filter
+   *       cleared when nobody expected it.
+   *
+   * Only the copy on screen listens. A hidden copy hears nothing, and
+   * compares the version once, in the focus check above.
+   *
+   * Empty dependencies, so the callback is made once, at the first render,
+   * and every focus runs that same callback with the first render's
+   * functions. Safe because endUndoWindow never changes and applyFilter
+   * reads no state (see the comment above applyFilter).
+   */
+  useFocusEffect(
+    useCallback(() => {
+      const stopAddListening = onAddSheetRequested(() =>
         endUndoWindow("openAdd"),
       );
+
+      const stopHearing = onExpensesChanged(() => {
+        const version = expenseVersion();
+        const seen = seenRef.current;
+        const own = version === seen;
+        if (__DEV__) {
+          console.log(
+            `[${screen}] heard: version ${version}, seen ${seen} → ` +
+              (own ? "own write, nothing" : "show all"),
+          );
+        }
+        if (!own) applyFilter(null);
+      });
+
       return () => {
-        stopListening();
+        stopAddListening();
+        stopHearing();
         endUndoWindow("leaving the screen");
       };
     }, []),
@@ -1195,6 +1309,11 @@ export default function ExpenseListScreen({
   ) => {
     updateExpense(target.id, title, amountMinor, currency, categoryId);
 
+    /* This copy patches itself below, so the new version is already shown.
+     * Marked seen now, inside the handler, so the listener finds nothing to
+     * do when it is told after the handler returns. */
+    seenRef.current = expenseVersion();
+
     /* Does this row still belong in what is on screen? With no filter
      * everything belongs, so it always stays. */
     const stillInFilter = !filter || filter.id === categoryId;
@@ -1286,6 +1405,10 @@ export default function ExpenseListScreen({
        * occur. */
       const copy = deleteExpense(e.id);
 
+      /* Own write, patched by hand below. Same reason as in saveEdit: a
+       * re-read here would throw away the scroll and the exit animation. */
+      seenRef.current = expenseVersion();
+
       /* The Delete button sits inside the only open row, and that row is
        * about to unmount. Forget its handle, so the next swipe does not try
        * to close a row that is gone. */
@@ -1326,6 +1449,9 @@ export default function ExpenseListScreen({
     /* The database first, as in deleteRow. If the restore throws, the copy
      * stays held and the banner stays up. */
     restoreExpense(copy);
+
+    /* Own write, patched by hand below. Same reason as in saveEdit. */
+    seenRef.current = expenseVersion();
 
     /*
      * Rebuilt field by field so the list holds exactly what the list query
