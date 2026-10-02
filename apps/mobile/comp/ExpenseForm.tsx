@@ -191,7 +191,15 @@ export default function ExpenseForm({
     setCatError(null);
   };
 
-  const saveNewCategory = () => {
+  /*
+   * Creates the typed category and selects it. Two callers: the ✓ (and the
+   * keyboard's done key in the field), and handleSave below.
+   *
+   * Returns the new row, or null when insertCategory threw. On null the
+   * message is already under the field, the field keeps what was typed so it
+   * can be corrected, and nothing was written.
+   */
+  const saveNewCategory = (): Category | null => {
     try {
       /* Returns the row it created, so nothing needs re-reading to select
        * it. */
@@ -203,26 +211,58 @@ export default function ExpenseForm({
       setPickedByUser(true);
 
       cancelAddCategory();
+      return made;
     } catch (err) {
       /* Deliberately does NOT call cancelAddCategory(). The field keeps what
        * was typed so it can be corrected. */
       setCatError(err instanceof Error ? err.message : String(err));
+      return null;
     }
   };
 
   const handleSave = () => {
-    /* The amount field's "done" key calls this directly and ignores the
-     * disabled button, so the guard is real protection, not decoration. */
-    if (amountMinor === null) return;
+    /*
+     * The same rule as the button's `disabled`. The amount field's "done" key
+     * calls this directly and ignores the disabled button, so this guard is
+     * the real protection, not decoration.
+     *
+     * It checks the title too, through canSave. Below, a category can be
+     * written BEFORE the expense, and it must never be written for an expense
+     * that is not going to save. `amountMinor === null` stays as its own
+     * check because TypeScript cannot see that canSave already ruled it out.
+     */
+    if (amountMinor === null || !canSave) return;
 
     /* The fallback lives here rather than in state, so "not chosen" stays
      * visibly different from "chose Uncategorised" right up to the call. */
-    onSubmit(
-      title.trim(),
-      amountMinor,
-      currencyCode,
-      category?.id ?? UNCATEGORISED_ID,
-    );
+    let categoryId = category?.id ?? UNCATEGORISED_ID;
+
+    /*
+     * A name typed into the new-category field, with the ✓ not tapped.
+     *
+     * The person meant "file this in the category I just typed". Without this
+     * block, the save used whatever category was already showing, and the
+     * typed name went away with the sheet, without a word.
+     *
+     * So the category is made first, exactly as the ✓ makes it, and the
+     * expense goes into it. If making it throws — a name that already
+     * exists — the message shows under the field and NOTHING is saved, so
+     * the name can be fixed and the button tapped again.
+     *
+     * Two writes, not one transaction. If the expense write ever failed after
+     * this, what is left is an empty category: a valid state, visible on the
+     * Categories tab. And because saveNewCategory closes the field and selects
+     * the new row, a second tap files into it instead of making it twice.
+     *
+     * An open field with nothing typed in it is ignored, the same as ✕.
+     */
+    if (addingCategory && newCatDraft.trim().length > 0) {
+      const made = saveNewCategory();
+      if (made === null) return;
+      categoryId = made.id;
+    }
+
+    onSubmit(title.trim(), amountMinor, currencyCode, categoryId);
   };
 
   return (

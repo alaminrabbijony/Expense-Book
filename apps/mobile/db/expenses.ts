@@ -853,7 +853,7 @@ export const restoreExpense = (e: DeletedExpense): void => {
      *
      * Same column order as insertExpense, with the same hazard: currencyCode
      * and categoryId are adjacent strings, and swapping them still compiles.
-     * probeExpenseDelete reads every column back by name to catch it.
+     * probeEaxpenseDelete reads every column back by name to catch it.
      */
     `INSERT INTO expenses (id, title, amount_minor, currency_code, created_at, category_id)
      VALUES (?, ?, ?, ?, ?, ?)`,
@@ -867,4 +867,253 @@ export const restoreExpense = (e: DeletedExpense): void => {
       `restoreExpense(${e.id}): "${e.title}" in ${Date.now() - t0}ms`,
     );
   }
+};
+/* ─── A range of time: this month on Home ──────────────────────────────── */
+
+/**
+ * A stretch of time, as two instants in epoch milliseconds.
+ *
+ * Half-open: `start` is inside the range, `next` is not. `next` is the first
+ * moment of whatever comes after — for a month, midnight on the 1st of the
+ * following month. So every query below says `>= start AND < next`, and an
+ * expense saved at exactly that midnight belongs to one month only.
+ *
+ * BETWEEN is never used for this. BETWEEN includes both ends, so a row at
+ * exactly `next` would be counted in this month and in the next one.
+ */
+export type DateRange = { start: number; next: number };
+
+/**
+ * The calendar month that `at` falls in, in the phone's own time zone.
+ * It sits beside the queries because they depend on what its numbers mean.
+ *
+ * new Date(y, m, 1) is LOCAL midnight on the 1st. Date.UTC(y, m, 1) would
+ * be UTC midnight, which is 6 AM in Dhaka: every expense saved between
+ * midnight and 6 AM on the 1st would land in the month before.
+ *
+ * `next` is built the same way, never as `start` plus some days. Months are
+ * 28 to 31 days long, and where clocks change for summer time, one day a
+ * year is 23 hours and another is 25. Month 12 of one year is January of
+ * the next, so December needs nothing special.
+ *
+ * KNOWN ISSUE: the running JavaScript engine keeps the time zone it started
+ * with. After the phone changes zone, the month still starts at the old
+ * zone's midnight until the app restarts. The date line on each card has
+ * the same issue.
+ */
+export const monthRangeAt = (at: number): DateRange => {
+  const d = new Date(at);
+  return {
+    start: new Date(d.getFullYear(), d.getMonth(), 1).getTime(),
+    next: new Date(d.getFullYear(), d.getMonth() + 1, 1).getTime(),
+  };
+};
+
+/*
+ * Whatever parameter type all() accepts, taken from all() itself, so this
+ * file never has to restate how db/index.ts declares it.
+ */
+type BindParams = Parameters<typeof all>[1];
+
+/* The range queries that have already reported since the app started. */
+const reported = new Set<string>();
+
+/**
+ * Run a range query. In development, also report its first call since the
+ * app started: rows, milliseconds, and the plan SQLite chose.
+ *
+ * "SEARCH ... USING INDEX" in the plan means SQLite goes straight to where
+ * the range starts. "SCAN expenses" would mean it reads the whole table to
+ * find one month, so every month would cost as much as all of history.
+ *
+ * The time covers the query alone. EXPLAIN QUERY PLAN runs later, from a
+ * setTimeout, after the screen has finished its own work: a diagnostic
+ * inside the moment being measured would add itself to the number.
+ *
+ * Once per query per launch, so the log stays readable. `r` resets it.
+ */
+const readInRange = <T>(
+  label: string,
+  sql: string,
+  params: BindParams,
+): T[] => {
+  const t0 = Date.now();
+  const rows = all<T>(sql, params);
+  const ms = Date.now() - t0;
+
+  if (__DEV__ && !reported.has(label)) {
+    reported.add(label);
+    const n = rows.length;
+    setTimeout(() => {
+      /* A diagnostic must never be the thing that crashes the app. */
+      try {
+        const plan = all<{ detail: string }>(
+          `EXPLAIN QUERY PLAN ${sql}`,
+          params,
+        );
+        console.log(
+          `${label}: ${n} ${n === 1 ? "row" : "rows"} in ${ms}ms, first call since launch — plan: ${plan
+            .map((step) => step.detail)
+            .join(" | ")}`,
+        );
+      } catch (e) {
+        console.log(`${label}: plan failed — ${String(e)}`);
+      }
+    }, 0);
+  }
+
+  return rows;
+};
+
+/*
+ * NEW strings. LIST_PAGE_SELECT and LIST_PAGE_SELECT_FILTERED are not
+ * edited: every recorded list timing describes them character for character.
+ *
+ * Built from the same LIST_PAGE_HEAD and LIST_PAGE_TAIL, so the ORDER BY is
+ * the very same text. The code that puts an undone delete back in place
+ * copies that ORDER BY by hand, and it is only right while every list sorts
+ * the same way.
+ *
+ * The range is on created_at, the column the list already sorts by, so the
+ * existing indexes can find where the range starts and hand the rows back
+ * already in order. The plan readInRange reports confirms it on the phone.
+ */
+const LIST_PAGE_SELECT_RANGE = `${LIST_PAGE_HEAD}
+      WHERE created_at >= ? AND created_at < ?
+      ${LIST_PAGE_TAIL}`;
+
+const LIST_PAGE_SELECT_RANGE_FILTERED = `${LIST_PAGE_HEAD}
+      WHERE category_id = ?
+        AND created_at >= ? AND created_at < ?
+      ${LIST_PAGE_TAIL}`;
+
+/**
+ * One page of the expenses inside `range`, newest first.
+ *
+ * listExpensePage with a range. Every page of one list must be read with the
+ * SAME range, or paging skips or repeats rows. So when the month changes,
+ * the caller starts again from offset 0.
+ *
+ * @param offset How many rows of this range to skip.
+ * @param range Usually monthRangeAt(...) for the month on screen.
+ * @param categoryId Omit for every category.
+ */
+export const listExpensePageInRange = (
+  offset: number,
+  range: DateRange,
+  categoryId?: string,
+): Expense[] => {
+  /*
+   * Two calls, the same as listExpensePage. In the filtered branch the
+   * category id goes FIRST, because it comes first in the SQL. Each `?` is
+   * filled from the array in order, and nothing checks which is which: put
+   * a date where the id belongs and the page is simply empty.
+   */
+  const rows = categoryId
+    ? readInRange<ExpenseRow>(
+        "listExpensePageInRange, filtered",
+        `${LIST_PAGE_SELECT_RANGE_FILTERED} LIMIT ? OFFSET ?`,
+        [categoryId, range.start, range.next, PAGE_SIZE, offset],
+      )
+    : readInRange<ExpenseRow>(
+        "listExpensePageInRange",
+        `${LIST_PAGE_SELECT_RANGE} LIMIT ? OFFSET ?`,
+        [range.start, range.next, PAGE_SIZE, offset],
+      );
+  return rows.map(toExpense);
+};
+
+/**
+ * How many expenses and how much money inside `range`, for the header.
+ *
+ * readTotals does NOT get a range argument instead. The categories screen's
+ * delete dialog calls readTotals(id) to say how much money a delete will
+ * move, and that must be every expense in the category, not this month's.
+ * A separate function means that call cannot pick up a range by mistake.
+ *
+ * @param categoryId Omit for every category. Same rule as readTotals: when
+ *   the list is filtered, the total narrows with it.
+ */
+export const readTotalsInRange = (
+  range: DateRange,
+  categoryId?: string,
+): { count: number; totalMinor: Minor } => {
+  const rows = categoryId
+    ? readInRange<{ n: number; total: number | null }>(
+        "readTotalsInRange, filtered",
+        `SELECT COUNT(*) AS n, SUM(amount_minor) AS total
+           FROM expenses
+          WHERE category_id = ?
+            AND created_at >= ? AND created_at < ?`,
+        [categoryId, range.start, range.next],
+      )
+    : readInRange<{ n: number; total: number | null }>(
+        "readTotalsInRange",
+        `SELECT COUNT(*) AS n, SUM(amount_minor) AS total
+           FROM expenses
+          WHERE created_at >= ? AND created_at < ?`,
+        [range.start, range.next],
+      );
+
+  const row = rows[0] ?? { n: 0, total: null };
+  return {
+    count: row.n,
+    /* An empty month hits this for real: SUM over zero rows is NULL, not 0. */
+    totalMinor: asMinor(row.total ?? 0),
+  };
+};
+
+/**
+ * readCategoryBreakdown, counting only the expenses inside `range`.
+ *
+ * Still every category, empty ones included, and still no category filter:
+ * the ⋯ sheet shows what you could switch to.
+ *
+ * THE RANGE GOES IN THE JOIN'S ON CLAUSE, NOT IN A WHERE.
+ *
+ * ON decides which expenses get attached to each category. A category with
+ * none in the range still comes out once, with every e.* column NULL, and
+ * COUNT(e.id) turns that into 0.
+ *
+ * A WHERE runs after the join, on those NULLs. `NULL >= ?` is not true, so
+ * the empty category's row is thrown away. A category whose expenses are all
+ * in other months loses every row the same way. Both vanish from the sheet,
+ * nothing throws, and a category that is not listed cannot be picked as a
+ * filter.
+ */
+export const readCategoryBreakdownInRange = (
+  range: DateRange,
+): CategoryBreakdown[] => {
+  const rows = readInRange<{
+    id: string;
+    name: string;
+    n: number;
+    total: number | null;
+  }>(
+    "readCategoryBreakdownInRange",
+    /*
+     * COUNT(e.id), not COUNT(*), for the reason readCategoryBreakdown gives:
+     * an empty category's one NULL-filled row would count as 1. The same
+     * ORDER BY as readCategoryBreakdown, so the sheet sorts the same way.
+     */
+    `SELECT c.id                AS id,
+            c.name              AS name,
+            COUNT(e.id)         AS n,
+            SUM(e.amount_minor) AS total
+       FROM categories c
+       LEFT JOIN expenses e
+              ON e.category_id = c.id
+             AND e.created_at >= ?
+             AND e.created_at < ?
+      GROUP BY c.id, c.name
+      ORDER BY total DESC, c.id ASC`,
+    [range.start, range.next],
+  );
+
+  return rows.map((r) => ({
+    id: r.id,
+    name: r.name,
+    count: r.n,
+    totalMinor: asMinor(r.total ?? 0),
+  }));
 };
