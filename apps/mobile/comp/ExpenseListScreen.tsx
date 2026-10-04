@@ -6,13 +6,21 @@ import { expenseVersion, onExpensesChanged } from "@/db/changes";
 import {
   deleteExpense,
   listExpensePage,
+  listExpensePageInRange,
+  monthRangeAt,
   readCategories,
   readExpenseForEdit,
   readTotals,
+  readTotalsInRange,
   restoreExpense,
   updateExpense,
 } from "@/db/expenses";
-import type { DeletedExpense, Expense, ExpenseForEdit } from "@/db/expenses";
+import type {
+  DateRange,
+  DeletedExpense,
+  Expense,
+  ExpenseForEdit,
+} from "@/db/expenses";
 /* DEV TOOLS — commented out together with the dev row near the bottom of
    this file. To bring them back, delete this line and the closing line
    below the import, then do the same at the dev row.
@@ -91,6 +99,13 @@ const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const MONTHS = [
   "Jan", "Feb", "Mar", "Apr", "May", "Jun",
   "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
+/* Full names, for the month on the top card. MONTHS above stays short for
+ * the date line on each card. */
+const MONTH_NAMES = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
 ];
 
 /*
@@ -185,6 +200,53 @@ function formatWhen(
   return d.getFullYear() === new Date(todayStart).getFullYear()
     ? `${WEEKDAYS[d.getDay()]} ${date}, ${clock}`
     : `${date} ${d.getFullYear()}, ${clock}`;
+}
+
+/*
+ * The month a range starts in, by name: "October". Read from `start`, so it
+ * names the month the rows and the total were read for.
+ *
+ * The `?? ""` only satisfies the type checker: getMonth() is always 0 to 11.
+ */
+function monthName(range: DateRange): string {
+  return MONTH_NAMES[new Date(range.start).getMonth()] ?? "";
+}
+
+/* "October 2026", for the top card. */
+function formatMonth(range: DateRange): string {
+  return `${monthName(range)} ${new Date(range.start).getFullYear()}`;
+}
+
+/*
+ * What the empty list says. An empty month, an empty app and an empty
+ * filter each need different help:
+ *
+ *   month, no filter     Nothing spent in October yet / Tap + to add one.
+ *   month and a filter   No Food expenses this month / Nothing's been filed
+ *                        here yet.
+ *   no month, no filter  No expenses yet / Tap + to add your first one.
+ *   no month, a filter   No expenses in Food / Nothing's been filed here yet.
+ *
+ * A filter also gets Show all, drawn where this is used. YOURS TO REWORD.
+ */
+function emptyText(
+  filter: CategoryChoice,
+  month: DateRange | null,
+): { title: string; body: string } {
+  if (filter) {
+    return {
+      title: month
+        ? `No ${filter.name} expenses this month`
+        : `No expenses in ${filter.name}`,
+      body: "Nothing's been filed here yet.",
+    };
+  }
+  return month
+    ? {
+        title: `Nothing spent in ${monthName(month)} yet`,
+        body: "Tap + to add one.",
+      }
+    : { title: "No expenses yet", body: "Tap + to add your first one." };
 }
 
 /*
@@ -630,6 +692,31 @@ const insertInSortOrder = (list: Expense[], row: Expense): Expense[] => {
 };
 
 /*
+ * The two reads every fresh read of the list makes: one page, and the
+ * header's count and money.
+ *
+ * `range` null means every expense, through the all-time queries whose
+ * recorded timings must not change. A range means the range queries.
+ *
+ * Module functions that take the range as an argument, so no closure can
+ * hold on to an old month. Callers pass monthRef.current at the moment of
+ * the call.
+ */
+function readPage(
+  range: DateRange | null,
+  offset: number,
+  categoryId?: string,
+): Expense[] {
+  return range
+    ? listExpensePageInRange(offset, range, categoryId)
+    : listExpensePage(offset, categoryId);
+}
+
+function readHeaderTotals(range: DateRange | null, categoryId?: string) {
+  return range ? readTotalsInRange(range, categoryId) : readTotals(categoryId);
+}
+
+/*
  * Two tabs render this screen: Home with its top card, All expenses without
  * it. Each tab is a SEPARATE COPY with its own rows, total, offset and undo
  * window — which is why a write on one tab has to reach the other.
@@ -640,13 +727,19 @@ const insertInSortOrder = (list: Expense[], row: Expense): Expense[] => {
  *
  * `showTopCard` is the only visual difference. Without the card there is no
  * total, no ⋯ and no filter, so `filter` stays null on All expenses.
+ *
+ * `monthOnly` is the one difference in what is read. Home passes it: its
+ * list, its total and its ⋯ sheet cover this month only. All expenses leaves
+ * it out and keeps every expense.
  */
 export default function ExpenseListScreen({
   screen,
   showTopCard,
+  monthOnly = false,
 }: {
   screen: ScreenName;
   showTopCard: boolean;
+  monthOnly?: boolean;
 }) {
   /*
    * This copy's number, for the dev log above.
@@ -704,9 +797,33 @@ export default function ExpenseListScreen({
    */
   const openRowRef = useRef<SwipeableMethods | null>(null);
 
+  /*
+   * The month this copy's rows and total were read for, or null for every
+   * expense. All never passes monthOnly, so it stays null there.
+   *
+   * Held twice on purpose, like heldRef and held further down:
+   *
+   *   monthRef  what every read uses: the first page, applyFilter, reload
+   *             and loadMore. It has to be a ref, because applyFilter is
+   *             also called by the change listener, which is made ONCE, at
+   *             the first render. A month taken from render scope would be
+   *             the first render's month forever: after the 1st, an add
+   *             would re-read last month, and the new expense would never
+   *             show.
+   *   month     state, so the top card redraws when the month changes. It
+   *             draws the month's name and hands the range to the ⋯ sheet.
+   *
+   * Set in two places: the first page below, and the month check, through
+   * holdMonth, which writes both so they cannot drift apart.
+   */
+  const monthRef = useRef<DateRange | null>(null);
+
   const [rows, setRows] = useState<Expense[]>(() => {
+    /* Worked out in the same step as the page it scopes, so the two can
+     * never name different months. */
+    monthRef.current = monthOnly ? monthRangeAt(Date.now()) : null;
     const t0 = Date.now();
-    const first = listExpensePage(0);
+    const first = readPage(monthRef.current, 0);
     console.log(
       `[${screen}] first page: ${first.length} rows in ${Date.now() - t0}ms`,
     );
@@ -717,7 +834,22 @@ export default function ExpenseListScreen({
     return first;
   });
 
-  const [totals, setTotals] = useState(() => readTotals());
+  /* After the rows initialiser, which sets monthRef: React runs state
+   * initialisers in the order they are written. */
+  const [totals, setTotals] = useState(() =>
+    readHeaderTotals(monthRef.current),
+  );
+
+  const [month, setMonth] = useState<DateRange | null>(
+    () => monthRef.current,
+  );
+
+  /* useCallback for the same reason as holdCopy: the month check lists it,
+   * and it only touches a ref and a setter, so it never changes. */
+  const holdMonth = useCallback((range: DateRange) => {
+    monthRef.current = range;
+    setMonth(range);
+  }, []);
 
   /*
    * Local midnight at the start of today. Every row reads it to decide
@@ -990,9 +1122,9 @@ export default function ExpenseListScreen({
   /*
    * Go back to page one and re-read the total, KEEPING the filter.
    *
-   * Its caller is the focus check below: this copy comes back into focus and
-   * the expense version moved while it was hidden. A write on another tab is
-   * the only way that happens.
+   * Two callers. The focus check below: this copy comes back into focus and
+   * the expense version moved while it was hidden — a write on another tab
+   * is the only way that happens. And the month check, on the 1st.
    *
    * It reads `filter` from state. That is only safe where the copy of reload
    * being called was made in a render that already had the current filter —
@@ -1006,11 +1138,11 @@ export default function ExpenseListScreen({
 
     const categoryId = filter?.id;
 
-    const first = listExpensePage(0, categoryId);
+    const first = readPage(monthRef.current, 0, categoryId);
     offsetRef.current = first.length;
     seenRef.current = expenseVersion();
     setRows(first);
-    setTotals(readTotals(categoryId));
+    setTotals(readHeaderTotals(monthRef.current, categoryId));
   };
 
   // Switch filter. Takes the choice as an ARGUMENT, never from state —
@@ -1022,6 +1154,9 @@ export default function ExpenseListScreen({
   // safe to call from the change listener below, which is created once and
   // keeps the first render's copy of this function. If this function ever
   // starts reading state, that listener silently uses the old value.
+  //
+  // The month reaches it the same way: monthRef is a ref, so even the
+  // listener's first-render copy of this function reads the current month.
   const applyFilter = (choice: CategoryChoice) => {
     /* Page one of a different set, with totals for a different filter. The
      * held row's position belonged to the list being thrown away, so undo
@@ -1030,7 +1165,7 @@ export default function ExpenseListScreen({
 
     const categoryId = choice?.id;
 
-    const first = listExpensePage(0, categoryId);
+    const first = readPage(monthRef.current, 0, categoryId);
     // Page one of a different set. The offset MUST go back to zero, or
     // switching from one category to another asks for rows 300-350 of a set
     // with none.
@@ -1041,11 +1176,52 @@ export default function ExpenseListScreen({
     setRows(first);
     // The header total narrows with the list. A list showing one category
     // above a total showing everything is a screen that lies quietly.
-    setTotals(readTotals(categoryId));
+    setTotals(readHeaderTotals(monthRef.current, categoryId));
 
     setFilter(choice);
     setSheetOpen(false);
   };
+
+  /*
+   * The month check: when the day changes, did the month change too?
+   *
+   * Runs once after the first render, then whenever todayStart changes — at
+   * local midnight, and when the app comes back to the front (see refresh
+   * above). On most days the month is the same and it stops after one log
+   * line. On the 1st it moves this copy to the new month and re-reads.
+   *
+   * reload, not applyFilter: a filter picked before midnight stays picked.
+   * reload reads `filter` from state, and that is safe here for the same
+   * reason as in the focus check below. This effect is rebuilt on every
+   * render, and React runs the copy from the render where todayStart
+   * changed, which already holds the current filter. reload is deliberately
+   * NOT in the dependency list: it is a new function on every render, and
+   * listing it would run this check on every render.
+   *
+   * holdMonth comes FIRST, because reload reads monthRef.
+   *
+   * reload also ends the undo window, and that matters here: an Undo after
+   * the month moved would put last month's expense into this month's list.
+   *
+   * Only Home has a month. On All this returns at once.
+   */
+  useEffect(() => {
+    if (!monthOnly) return;
+    const current = monthRangeAt(todayStart);
+    const was = monthRef.current;
+    const changed = was?.start !== current.start;
+    if (__DEV__) {
+      console.log(
+        `[${screen}] month check: ${formatMonth(current)} → ` +
+          (changed
+            ? `changed from ${was ? formatMonth(was) : "none"}, reload`
+            : "same month"),
+      );
+    }
+    if (!changed) return;
+    holdMonth(current);
+    reload();
+  }, [todayStart, monthOnly, screen, holdMonth]);
 
   /*
    * The check a copy runs when it comes back into focus: is what I show
@@ -1174,14 +1350,17 @@ export default function ExpenseListScreen({
 
   const loadMore = () => {
     // totals.count is the FILTERED count, so this guard already knows when
-    // it has reached the end of an empty category.
+    // it has reached the end of an empty category. On Home it is also this
+    // month's count.
     if (offsetRef.current >= totals.count) {
       return;
     }
 
     // The filter has to reach here too. Miss it and scrolling to the bottom
     // of one category quietly starts appending another's rows underneath.
-    const next = listExpensePage(offsetRef.current, filter?.id);
+    // The month likewise: without monthRef, page two of October would be
+    // page two of every expense ever.
+    const next = readPage(monthRef.current, offsetRef.current, filter?.id);
     offsetRef.current += next.length;
     setRows((prev) => [...prev, ...next]);
 
@@ -1483,6 +1662,8 @@ export default function ExpenseListScreen({
     endUndoWindow("undoDelete");
   };
 
+  const empty = emptyText(filter, month);
+
   return (
     <SafeAreaView style={styles.screen} edges={SAFE_EDGES}>
       {/* With the header gone, the clock and battery sit straight on the
@@ -1514,10 +1695,26 @@ export default function ExpenseListScreen({
             </Pressable>
           </View>
 
+          {/* The month the list and the total cover. Drawn from `month`,
+              the same range the rows were read with, so the words cannot
+              name a different month. Nothing is drawn without one. */}
+          {month && (
+            <Text style={styles.monthLabel} numberOfLines={1}>
+              {formatMonth(month)}
+            </Text>
+          )}
+
           {/* numberOfLines is what actually truncates. Without it a long
               category name wraps to a second line and pushes the total down. */}
-          <Text style={styles.headerLabel} numberOfLines={1}>
-            {filter ? filter.name : "Spent Recently"}
+          <Text
+            style={[styles.headerLabel, month && styles.headerLabelUnderMonth]}
+            numberOfLines={1}
+          >
+            {filter
+              ? filter.name
+              : month
+                ? "Spent this month"
+                : "Spent Recently"}
           </Text>
 
           <Text style={styles.headerTotal}>
@@ -1647,14 +1844,8 @@ export default function ExpenseListScreen({
              */
             ListEmptyComponent={
               <View style={styles.empty}>
-                <Text style={styles.emptyTitle}>
-                  {filter ? `No expenses in ${filter.name}` : "No expenses yet"}
-                </Text>
-                <Text style={styles.emptyBody}>
-                  {filter
-                    ? "Nothing's been filed here yet."
-                    : "Tap + to add your first one."}
-                </Text>
+                <Text style={styles.emptyTitle}>{empty.title}</Text>
+                <Text style={styles.emptyBody}>{empty.body}</Text>
                 {filter && (
                   <Pressable
                     accessibilityRole="button"
@@ -1802,6 +1993,10 @@ export default function ExpenseListScreen({
 
       <CategorySheet
         visible={sheetOpen}
+        // The same range the list and the total behind the sheet were read
+        // with, so its numbers cover the same stretch of time. A state
+        // object, the same one on every render until the month changes.
+        range={month}
         selectedId={filter?.id ?? null}
         onSelect={applyFilter}
         onClose={() => setSheetOpen(false)}
@@ -1874,6 +2069,20 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     overflow: "hidden",
   },
+  /*
+   * YOURS TO RESTYLE — the month above the label: bold like the total,
+   * smaller. It takes over the white space above the label (marginTop 96),
+   * so the card is one line taller than before. Lower the 96 to win it back.
+   */
+  monthLabel: {
+    color: INK,
+    fontSize: 18,
+    fontWeight: "700",
+    marginTop: 96,
+  },
+  /* The label sits just under the month when there is one. Without a month
+   * it keeps its own marginTop below. */
+  headerLabelUnderMonth: { marginTop: 4 },
    headerLabel: {
     color: "#6E6E73",
     fontSize: 13,

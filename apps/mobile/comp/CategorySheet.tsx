@@ -1,5 +1,10 @@
-
-import { readCategoryBreakdown, readTotals } from "@/db/expenses";
+import {
+  readCategoryBreakdown,
+  readCategoryBreakdownInRange,
+  readTotals,
+  readTotalsInRange,
+} from "@/db/expenses";
+import type { DateRange } from "@/db/expenses";
 import { DEFAULT_CURRENCY, formatMoney } from "@et/shared";
 import { useEffect, useState } from "react";
 import { Modal, Pressable, StyleSheet, Text, View } from "react-native";
@@ -9,6 +14,12 @@ export type CategoryChoice = { id: string; name: string } | null;
 
 type Props = {
   visible: boolean;
+  /*
+   * The stretch of time the screen behind is showing: this month on Home,
+   * or null for every expense. Required, so a caller cannot forget it and
+   * get all-time numbers under a month's total without a word.
+   */
+  range: DateRange | null;
   // Which row gets the tick. null means "All categories".
   selectedId: string | null;
   onSelect: (choice: CategoryChoice) => void;
@@ -20,6 +31,7 @@ type Props = {
 
 export default function CategorySheet({
   visible,
+  range,
   selectedId,
   onSelect,
   onClose,
@@ -42,10 +54,18 @@ export default function CategorySheet({
   useEffect(() => {
     if (!visible) return;
 
-    // readTotals with NO argument. This is the grand total and it stays the
-    // grand total no matter what the screen behind is filtered to.
-    const grand = readTotals();
-    const breakdown = readCategoryBreakdown();
+    /*
+     * The same stretch of time as the list and the total behind the sheet.
+     * If they covered different times, "All categories" here would disagree
+     * with the total the person just saw.
+     *
+     * Still NO category argument. "All categories" is the total for every
+     * category, whatever the screen behind is filtered to.
+     */
+    const grand = range ? readTotalsInRange(range) : readTotals();
+    const breakdown = range
+      ? readCategoryBreakdownInRange(range)
+      : readCategoryBreakdown();
 
     setItems([
       {
@@ -65,7 +85,12 @@ export default function CategorySheet({
         trailing: `${c.count}   ${formatMoney(c.totalMinor, DEFAULT_CURRENCY)}`,
       })),
     ]);
-  }, [visible]);
+
+    /* `range` is listed so an open sheet re-reads if the month moves under
+     * it. The screen keeps it in state, so it is the same object on every
+     * render until then. A new object each render would re-read on every
+     * render while the sheet is open. */
+  }, [visible, range]);
 
   return (
     <Modal
