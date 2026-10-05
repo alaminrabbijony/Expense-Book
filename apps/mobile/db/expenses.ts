@@ -915,20 +915,34 @@ export const monthRangeAt = (at: number): DateRange => {
  */
 type BindParams = Parameters<typeof all>[1];
 
-/* The range queries that have already reported since the app started. */
+/* The queries that have already reported since the app started. */
 const reported = new Set<string>();
 
 /**
- * Run a range query. In development, also report its first call since the
- * app started: rows, milliseconds, and the plan SQLite chose.
+ * Run a query and time it. In development, also report its first call
+ * since the app started: how many rows came back, the milliseconds, and the
+ * plan SQLite chose. The month's reads and the title page's reads both go
+ * through here.
  *
- * "SEARCH ... USING INDEX" in the plan means SQLite goes straight to where
- * the range starts. "SCAN expenses" would mean it reads the whole table to
- * find one month, so every month would cost as much as all of history.
+ * "Rows" counts what the query RETURNED. For a page, that is the page. For
+ * a total, it is always 1: the single result row. So a total can pass
+ * `addedUp`, which reads from that row how many expenses it added up, and
+ * the line says that too: "1 row in 4ms, added up 37 expenses". A total
+ * that does not pass it — the month's, today — still says only "1 row".
  *
- * The time covers the query alone. EXPLAIN QUERY PLAN runs later, from a
- * setTimeout, after the screen has finished its own work: a diagnostic
- * inside the moment being measured would add itself to the number.
+ * "SEARCH ... USING INDEX" in the plan means SQLite goes straight to the
+ * rows it needs. "SCAN expenses" means it reads the whole table to find
+ * them: for a month, every month would cost as much as all of history.
+ *
+ * The time covers the query alone. EXPLAIN QUERY PLAN runs from a
+ * setTimeout, so it never adds to that time, or to the screen's own
+ * "first page" time. `addedUp` runs after the time is taken, too.
+ *
+ * setTimeout(0) waits only until the code running now has finished, not
+ * until the screen is done. On launch, the plan lines print BEFORE the
+ * screen's mount effects ("[home] copy 1 mounted"), so the EXPLAIN can
+ * still land inside anything timed across several steps. It only plans the
+ * query and never runs it.
  *
  * Once per query per launch, so the log stays readable. `r` resets it.
  */
@@ -936,6 +950,7 @@ const readInRange = <T>(
   label: string,
   sql: string,
   params: BindParams,
+  addedUp?: (rows: T[]) => number,
 ): T[] => {
   const t0 = Date.now();
   const rows = all<T>(sql, params);
@@ -947,12 +962,15 @@ const readInRange = <T>(
     setTimeout(() => {
       /* A diagnostic must never be the thing that crashes the app. */
       try {
+        /* Empty for a query that does not pass addedUp, so its line reads
+         * exactly as before. */
+        const size = addedUp ? `, added up ${addedUp(rows)} expenses` : "";
         const plan = all<{ detail: string }>(
           `EXPLAIN QUERY PLAN ${sql}`,
           params,
         );
         console.log(
-          `${label}: ${n} ${n === 1 ? "row" : "rows"} in ${ms}ms, first call since launch — plan: ${plan
+          `${label}: ${n} ${n === 1 ? "row" : "rows"} in ${ms}ms${size}, first call since launch — plan: ${plan
             .map((step) => step.detail)
             .join(" | ")}`,
         );
@@ -1116,4 +1134,147 @@ export const readCategoryBreakdownInRange = (
     count: r.n,
     totalMinor: asMinor(r.total ?? 0),
   }));
+};
+/* ─── One title over time: the title page ─────────────────────────────── */
+
+/**
+ * The calendar year that `at` falls in, in the phone's own time zone: local
+ * midnight on 1 January, up to local midnight on the next 1 January.
+ *
+ * The same shape as monthRangeAt, for the same reasons. new Date(y, 0, 1),
+ * never Date.UTC, and never start plus 365 days: a leap year is 366.
+ *
+ * KNOWN ISSUE: the same as monthRangeAt's. The year starts at midnight in
+ * the time zone the app started in, until the app restarts.
+ */
+export const yearRangeAt = (at: number): DateRange => {
+  const y = new Date(at).getFullYear();
+  return {
+    start: new Date(y, 0, 1).getTime(),
+    next: new Date(y + 1, 0, 1).getTime(),
+  };
+};
+
+/*
+ * NEW strings, from the same LIST_PAGE_HEAD and LIST_PAGE_TAIL as every
+ * other list, so the title page sorts exactly like Home and All.
+ *
+ * COLLATE NOCASE, the comparison suggestCategory uses, so "Tea" and "tea"
+ * are one title. NOCASE folds the 26 letters A-Z and nothing else: a title
+ * in any other script is compared byte for byte. Anything that decides in
+ * JavaScript whether two titles are the same has to fold the same way
+ * (sameTitle, in the list screen).
+ *
+ * KNOWN ISSUE: there is no index on title yet. Each report prints its plan,
+ * so the cost can be measured before one is added.
+ */
+const LIST_PAGE_SELECT_TITLE = `${LIST_PAGE_HEAD}
+      WHERE title = ? COLLATE NOCASE
+      ${LIST_PAGE_TAIL}`;
+
+const LIST_PAGE_SELECT_TITLE_RANGE = `${LIST_PAGE_HEAD}
+      WHERE title = ? COLLATE NOCASE
+        AND created_at >= ? AND created_at < ?
+      ${LIST_PAGE_TAIL}`;
+
+/**
+ * One page of the expenses carrying `title`, newest first.
+ *
+ * Every page of one list must be read with the SAME range, or paging skips
+ * or repeats rows. So when the period changes, the caller starts again
+ * from offset 0.
+ *
+ * @param title The title exactly as it is stored on an expense.
+ * @param offset How many of this title's rows in `range` to skip.
+ * @param range The period on screen, or null for all time.
+ */
+export const listTitlePage = (
+  title: string,
+  offset: number,
+  range: DateRange | null,
+): Expense[] => {
+  /*
+   * Two calls, the same as listExpensePage. The title is the first `?` in
+   * both strings, so it goes first in both arrays. Nothing checks which `?`
+   * gets which value: the title in a date's place gives an empty page.
+   */
+  const rows = range
+    ? readInRange<ExpenseRow>(
+        "listTitlePage, in range",
+        `${LIST_PAGE_SELECT_TITLE_RANGE} LIMIT ? OFFSET ?`,
+        [title, range.start, range.next, PAGE_SIZE, offset],
+      )
+    : readInRange<ExpenseRow>(
+        "listTitlePage",
+        `${LIST_PAGE_SELECT_TITLE} LIMIT ? OFFSET ?`,
+        [title, PAGE_SIZE, offset],
+      );
+  return rows.map(toExpense);
+};
+
+/**
+ * How many expenses carry `title` inside `range`, and how much money.
+ *
+ * The same shape as readTotals, so the list screen's header, and the way it
+ * patches that header after an edit, a delete or an Undo, work unchanged.
+ *
+ * Both ends on the range, `>= start AND < next`, like every range in this
+ * file. With only a start, a row dated after the period would still count.
+ *
+ * @param range The period on screen, or null for all time.
+ */
+export const readTitleTotals = (
+  title: string,
+  range: DateRange | null,
+): { count: number; totalMinor: Minor } => {
+  /* Reads COUNT(*) back out of the one result row, so the report says how
+   * many expenses the total covers instead of "1 row". */
+  const addedUp = (r: { n: number }[]) => r[0]?.n ?? 0;
+
+  const rows = range
+    ? readInRange<{ n: number; total: number | null }>(
+        "readTitleTotals, in range",
+        `SELECT COUNT(*) AS n, SUM(amount_minor) AS total
+           FROM expenses
+          WHERE title = ? COLLATE NOCASE
+            AND created_at >= ? AND created_at < ?`,
+        [title, range.start, range.next],
+        addedUp,
+      )
+    : readInRange<{ n: number; total: number | null }>(
+        "readTitleTotals",
+        `SELECT COUNT(*) AS n, SUM(amount_minor) AS total
+           FROM expenses
+          WHERE title = ? COLLATE NOCASE`,
+        [title],
+        addedUp,
+      );
+
+  /* COUNT(*) is right here: there is no join, so no NULL-filled row can
+   * appear. */
+  const row = rows[0];
+  return {
+    count: row?.n ?? 0,
+    /* A period with nothing in it is NULL, not 0: SUM over no rows. "This
+     * month" hits that for real, even for a title with years of rows. */
+    totalMinor: asMinor(row?.total ?? 0),
+  };
+};
+
+/**
+ * The title of one expense, or null if no expense has that id.
+ *
+ * The title page is opened with an expense's id, not with its title. An id
+ * is only digits, lowercase letters and dashes, so it passes through a
+ * route unchanged. A title can hold "/", "%" or "?", which a route has to
+ * encode and decode on the way.
+ *
+ * A lookup by PRIMARY KEY, so SQLite goes straight to the one row.
+ */
+export const readExpenseTitle = (id: string): string | null => {
+  const rows = all<{ title: string }>(
+    `SELECT title FROM expenses WHERE id = ?`,
+    [id],
+  );
+  return rows[0]?.title ?? null;
 };

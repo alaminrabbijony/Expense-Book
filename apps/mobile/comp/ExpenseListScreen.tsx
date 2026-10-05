@@ -7,13 +7,16 @@ import {
   deleteExpense,
   listExpensePage,
   listExpensePageInRange,
+  listTitlePage,
   monthRangeAt,
   readCategories,
   readExpenseForEdit,
+  readTitleTotals,
   readTotals,
   readTotalsInRange,
   restoreExpense,
   updateExpense,
+  yearRangeAt,
 } from "@/db/expenses";
 import type {
   DateRange,
@@ -61,6 +64,7 @@ import {
 import Ionicons from "@expo/vector-icons/Ionicons";
 import {
   AppState,
+  BackHandler,
   Platform,
   Pressable,
   StatusBar,
@@ -114,8 +118,11 @@ const MONTH_NAMES = [
  * new Date(year, month, day) builds a LOCAL midnight. Subtracting
  * 24 * 60 * 60 * 1000 from a timestamp instead would be wrong on the days a
  * clock change makes shorter or longer than 24 hours.
+ *
+ * Exported, with readClockSettings and formatWhen below, for the title
+ * page: its rows show the same date line as these.
  */
-function startOfLocalDay(ms: number): number {
+export function startOfLocalDay(ms: number): number {
   const d = new Date(ms);
   return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
 }
@@ -148,7 +155,10 @@ function shiftLocalDay(dayStart: number, days: number): number {
  * The type allows null for uses24hourClock. Only the web build returns it;
  * treating it as false means "12-hour", the format the app had before.
  */
-function readClockSettings(): { clock24: boolean; zone: string | null } {
+export function readClockSettings(): {
+  clock24: boolean;
+  zone: string | null;
+} {
   const cal = getCalendars()[0];
   return {
     clock24: cal?.uses24hourClock ?? false,
@@ -184,7 +194,7 @@ function formatClock(d: Date, clock24: boolean): string {
  * the 24-hour setting inside would give a label that is never recomputed when
  * either one changes. See todayStart and clock24 in Index.
  */
-function formatWhen(
+export function formatWhen(
   createdAt: number,
   todayStart: number,
   clock24: boolean,
@@ -249,6 +259,97 @@ function emptyText(
     : { title: "No expenses yet", body: "Tap + to add your first one." };
 }
 
+/* ─── Periods: the title page's ⋯ menu ──────────────────────────────────── */
+
+/*
+ * The stretch of time a list covers. Home is always "month". All has none:
+ * it shows every expense. The title page starts at "month", and its ⋯ menu
+ * switches between all three.
+ */
+type Period = "month" | "year" | "all";
+
+/* The menu's rows, in order. YOURS TO REWORD. */
+const PERIODS: { key: Period; label: string }[] = [
+  { key: "month", label: "This month" },
+  { key: "year", label: "This year" },
+  { key: "all", label: "All time" },
+];
+
+/*
+ * The range a period covers at the moment `at`, in the phone's own time.
+ * null for all time, and for a list with no period at all (All).
+ */
+function rangeOf(period: Period | null, at: number): DateRange | null {
+  if (period === "month") return monthRangeAt(at);
+  if (period === "year") return yearRangeAt(at);
+  return null;
+}
+
+/*
+ * The period line on the title page's card: "October 2026", "2026" or
+ * "All time". Read from the range, so it names the stretch of time the rows
+ * and the total were read for.
+ */
+function formatPeriod(period: Period | null, range: DateRange | null): string {
+  if (period === "month" && range) return formatMonth(range);
+  if (period === "year" && range) {
+    return String(new Date(range.start).getFullYear());
+  }
+  return "All time";
+}
+
+/* The label under it. YOURS TO REWORD. */
+function periodLabel(period: Period | null): string {
+  if (period === "month") return "Spent this month";
+  if (period === "year") return "Spent this year";
+  return "Spent in total";
+}
+
+/*
+ * Whether two titles are the same title, the way the title queries compare
+ * them: COLLATE NOCASE, which folds the 26 letters A-Z and nothing else.
+ *
+ * NOT toLowerCase(). That folds every alphabet, so "Çay" and "çay" would be
+ * the same here and different in SQLite. An edit from one to the other
+ * would then keep a row on screen that the page's own query no longer finds.
+ */
+function sameTitle(a: string, b: string): boolean {
+  const fold = (s: string) => s.replace(/[A-Z]/g, (c) => c.toLowerCase());
+  return fold(a) === fold(b);
+}
+
+/*
+ * What the title page's empty list says. An empty month or year also gets
+ * Show all time, drawn where this is used, the way an empty filter on Home
+ * gets Show all. An empty all time gets nothing: there is nowhere wider to
+ * go. YOURS TO REWORD.
+ *
+ *   this month   No Tea expenses this month / Nothing yet this month.
+ *   this year    No Tea expenses this year / Nothing yet this year.
+ *   all time     No Tea expenses left / Every one was deleted or renamed.
+ */
+function titleEmptyText(
+  title: string,
+  period: Period | null,
+): { title: string; body: string } {
+  if (period === "month") {
+    return {
+      title: `No ${title} expenses this month`,
+      body: "Nothing yet this month.",
+    };
+  }
+  if (period === "year") {
+    return {
+      title: `No ${title} expenses this year`,
+      body: "Nothing yet this year.",
+    };
+  }
+  return {
+    title: `No ${title} expenses left`,
+    body: "Every one was deleted or renamed.",
+  };
+}
+
 /*
  * The icon on every expense card.
  *
@@ -271,11 +372,12 @@ let rowAnimStartedAt: number | null = null;
 /*
  * Which copy of this screen started that animation, for the same logs.
  *
- * Two tabs render this screen, and the module variables above are shared by
- * both copies. Only one row animates at a time anywhere in the app, so one
- * name is enough. deleteRow and undoDelete set it next to rowAnimStartedAt.
+ * Three places render this screen — Home, All and the title page — and the
+ * module variables above are shared by every copy. Only one row animates at
+ * a time anywhere in the app, so one name is enough. deleteRow and
+ * undoDelete set it next to rowAnimStartedAt.
  */
-type ScreenName = "home" | "all";
+type ScreenName = "home" | "all" | "title";
 let rowAnimScreen: ScreenName = "home";
 
 /*
@@ -292,7 +394,7 @@ let rowAnimScreen: ScreenName = "home";
  *                 number, because a hot update keeps state and only re-runs
  *                 the effects
  */
-const copiesBuilt: Record<ScreenName, number> = { home: 0, all: 0 };
+const copiesBuilt: Record<ScreenName, number> = { home: 0, all: 0, title: 0 };
 
 /*
  * Dev log: how long after the tap one step of a row animation happened.
@@ -455,6 +557,14 @@ const LIST_MOVE = LinearTransition.duration(200);
 const SAFE_EDGES = ["top", "left", "right"] as const;
 
 /*
+ * The title page pads ALL FOUR edges. It opens over the tabs, so there is
+ * no tab bar under it, and the bottom inset — the system navigation bar —
+ * is its own to pad. With SAFE_EDGES, the last row of a long list would sit
+ * under the navigation bar.
+ */
+const SAFE_EDGES_ALL = ["top", "left", "right", "bottom"] as const;
+
+/*
  * Tap feedback. Android shows a ripple; iOS has no ripple, so it dims
  * instead. Only one of the two ever runs on a platform — both on Android
  * would be double feedback.
@@ -497,7 +607,7 @@ const iosPressed = (pressed: boolean) =>
  * time it renders, and this screen makes it render on every one of its own
  * renders. So every cell calls renderItem again. memo is what lets this row
  * stop there: React compares each prop with the previous one (Object.is),
- * and if all eight are the same, the row, its swipeable and its texts are
+ * and if all nine are the same, the row, its swipeable and its texts are
  * not rendered again.
  *
  * That only works while every prop really is the same between renders:
@@ -510,10 +620,13 @@ const iosPressed = (pressed: boolean) =>
  *               This is also how the leaving row still gets `exiting`.
  *   onEdit,
  *   onDelete,
- *   onWillOpen  must keep their identity. They are useCallback in Index.
- *               Pass a function written inline instead, and it is a new
- *               function every render — every row renders again, nothing
- *               breaks, and the list is just slow again.
+ *   onWillOpen,
+ *   onOpen      must keep their identity. They are useCallback in the
+ *               screen below. Pass a function written inline instead, and
+ *               it is a new function every render — every row renders
+ *               again, nothing breaks, and the list is just slow again.
+ *               onOpen is null on the title page, where a tap does
+ *               nothing: null is the same value on every render too.
  *   todayStart  a plain number that changes once a day, at local midnight.
  *               When it does, every row renders once so "Today" can become
  *               "Yesterday". A Date object here instead would be a new
@@ -531,6 +644,7 @@ const ExpenseRow = memo(function ExpenseRow({
   onEdit,
   onDelete,
   onWillOpen,
+  onOpen,
 }: {
   expense: Expense;
   leaving: boolean;
@@ -540,6 +654,7 @@ const ExpenseRow = memo(function ExpenseRow({
   onEdit: (e: Expense, methods: SwipeableMethods | null) => void;
   onDelete: (e: Expense) => void;
   onWillOpen: (methods: SwipeableMethods | null) => void;
+  onOpen: ((e: Expense) => void) | null;
 }) {
   const swipeRef = useRef<SwipeableMethods | null>(null);
 
@@ -564,6 +679,27 @@ const ExpenseRow = memo(function ExpenseRow({
       rowsReRendered += 1;
     }
   }
+
+  /* What the card shows. Written once, and put inside a Pressable or a
+   * plain View below, depending on whether a tap does anything. */
+  const cardBody = (
+    <>
+      <View style={styles.iconCircle}>
+        <Ionicons name={DEFAULT_CATEGORY_ICON} size={20} color="#ECEDEE" />
+      </View>
+      <View style={styles.cardText}>
+        <Text style={styles.rowTitle} numberOfLines={1}>
+          {expense.title}
+        </Text>
+        <Text style={styles.rowWhen}>
+          {formatWhen(expense.createdAt, todayStart, clock24)}
+        </Text>
+      </View>
+      <Text style={styles.rowAmount}>
+        {formatMoney(expense.amountMinor, expense.currencyCode)}
+      </Text>
+    </>
+  );
 
   return (
     /*
@@ -642,27 +778,41 @@ const ExpenseRow = memo(function ExpenseRow({
       >
         {/* The card's backgroundColor is MECHANISM as well as looks: it
             must stay opaque, or the buttons behind would show through the
-            title and the amount during the slide. */}
-        <View style={styles.card}>
-          <View style={styles.iconCircle}>
-            <Ionicons
-              name={DEFAULT_CATEGORY_ICON}
-              size={20}
-              color="#ECEDEE"
-            />
-          </View>
-          <View style={styles.cardText}>
-            <Text style={styles.rowTitle} numberOfLines={1}>
-              {expense.title}
-            </Text>
-            <Text style={styles.rowWhen}>
-              {formatWhen(expense.createdAt, todayStart, clock24)}
-            </Text>
-          </View>
-          <Text style={styles.rowAmount}>
-            {formatMoney(expense.amountMinor, expense.currencyCode)}
-          </Text>
-        </View>
+            title and the amount during the slide.
+
+            A tap on the card opens this title's page. Two cases where a
+            touch on the card must NOT open it, both handled by the
+            swipeable (gesture-handler 2.28.0), not here:
+
+              the row is open    the view around the card is
+                                 pointerEvents "box-only" while the row is
+                                 open (ReanimatedSwipeable.tsx line 556), so
+                                 the card gets no touch at all. The tap goes
+                                 to the swipeable, which closes the row.
+              a swipe            when the swipe takes over, gesture-handler
+                                 cancels React Native's own handling of
+                                 that finger (GestureHandlerOrchestrator.kt,
+                                 makeActive; on Android the cancel reaches
+                                 React Native through
+                                 RNGestureHandlerRootHelper.kt, onCancel).
+                                 A cancelled press never calls onPress.
+
+            On the title page onOpen is null and the card is a plain View:
+            every card there is the same title, so a tap has nowhere to go,
+            and a card that ripples would promise something. */}
+        {onOpen ? (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={`Open ${expense.title}`}
+            android_ripple={RIPPLE}
+            style={({ pressed }) => [styles.card, iosPressed(pressed)]}
+            onPress={() => onOpen(expense)}
+          >
+            {cardBody}
+          </Pressable>
+        ) : (
+          <View style={styles.card}>{cardBody}</View>
+        )}
       </ReanimatedSwipeable>
     </Animated.View>
   );
@@ -695,51 +845,70 @@ const insertInSortOrder = (list: Expense[], row: Expense): Expense[] => {
  * The two reads every fresh read of the list makes: one page, and the
  * header's count and money.
  *
- * `range` null means every expense, through the all-time queries whose
- * recorded timings must not change. A range means the range queries.
+ * `title` set means the title page: that title's rows, in `range` or in
+ * all time. It never has a category filter.
  *
- * Module functions that take the range as an argument, so no closure can
- * hold on to an old month. Callers pass monthRef.current at the moment of
- * the call.
+ * Otherwise, `range` null means every expense, through the all-time queries
+ * whose recorded timings must not change. A range means the range queries.
+ *
+ * Module functions that take the range and the title as arguments, so no
+ * closure can hold on to an old period. Callers pass rangeRef.current at
+ * the moment of the call.
  */
 function readPage(
   range: DateRange | null,
   offset: number,
   categoryId?: string,
+  title?: string,
 ): Expense[] {
+  if (title !== undefined) return listTitlePage(title, offset, range);
   return range
     ? listExpensePageInRange(offset, range, categoryId)
     : listExpensePage(offset, categoryId);
 }
 
-function readHeaderTotals(range: DateRange | null, categoryId?: string) {
+function readHeaderTotals(
+  range: DateRange | null,
+  categoryId?: string,
+  title?: string,
+) {
+  if (title !== undefined) return readTitleTotals(title, range);
   return range ? readTotalsInRange(range, categoryId) : readTotals(categoryId);
 }
 
 /*
- * Two tabs render this screen: Home with its top card, All expenses without
- * it. Each tab is a SEPARATE COPY with its own rows, total, offset and undo
- * window — which is why a write on one tab has to reach the other.
+ * Three places render this screen, each a SEPARATE COPY with its own rows,
+ * total, offset and undo window — which is why a write in one has to reach
+ * the others:
  *
- * `screen` names the copy at the start of every dev log line, [home] or
- * [all]. Both copies print the same lines, and a line that cannot be traced
- * to a copy proves nothing.
+ *   Home         the top card, this month only, a category filter on ⋯
+ *   All          no card, every expense
+ *   the title    the top card for one title, a period menu on ⋯, opened
+ *   page         over the tabs by tapping a card on Home or All
  *
- * `showTopCard` is the only visual difference. Without the card there is no
- * total, no ⋯ and no filter, so `filter` stays null on All expenses.
+ * `screen` names the copy at the start of every dev log line: [home],
+ * [all] or [title]. The copies share most of their lines, and a line that
+ * cannot be traced to a copy proves nothing.
  *
- * `monthOnly` is the one difference in what is read. Home passes it: its
- * list, its total and its ⋯ sheet cover this month only. All expenses leaves
- * it out and keeps every expense.
+ * `showTopCard` draws the card. Without it there is no total, no ⋯ and no
+ * filter, so `filter` stays null on All expenses.
+ *
+ * `monthOnly` and `titleOnly` are the differences in what is read. Home
+ * passes monthOnly: its list, its total and its ⋯ sheet cover this month.
+ * The title page passes titleOnly, the title it shows: its list and total
+ * cover that title, in the period its ⋯ menu picks, this month to start.
+ * A prop never changes for a copy, so every function below can read them.
  */
 export default function ExpenseListScreen({
   screen,
   showTopCard,
   monthOnly = false,
+  titleOnly,
 }: {
   screen: ScreenName;
   showTopCard: boolean;
   monthOnly?: boolean;
+  titleOnly?: string;
 }) {
   /*
    * This copy's number, for the dev log above.
@@ -798,32 +967,46 @@ export default function ExpenseListScreen({
   const openRowRef = useRef<SwipeableMethods | null>(null);
 
   /*
-   * The month this copy's rows and total were read for, or null for every
-   * expense. All never passes monthOnly, so it stays null there.
+   * The period this copy shows, and the stretch of time it covers.
+   *
+   *   period   "month" on Home, always. null on All, which has no period.
+   *            On the title page "month" to start, then whatever its ⋯
+   *            menu picks: "month", "year" or "all".
+   *   range    the two instants the period covers right now: this month's
+   *            or this year's local midnights. null for all time, and on
+   *            All.
    *
    * Held twice on purpose, like heldRef and held further down:
    *
-   *   monthRef  what every read uses: the first page, applyFilter, reload
-   *             and loadMore. It has to be a ref, because applyFilter is
-   *             also called by the change listener, which is made ONCE, at
-   *             the first render. A month taken from render scope would be
-   *             the first render's month forever: after the 1st, an add
-   *             would re-read last month, and the new expense would never
-   *             show.
-   *   month     state, so the top card redraws when the month changes. It
-   *             draws the month's name and hands the range to the ⋯ sheet.
+   *   periodRef, rangeRef  what every read uses: the first page,
+   *            applyFilter, reload and loadMore. They have to be refs,
+   *            because applyFilter is also called by the change listener,
+   *            which is made ONCE, at the first render. A range taken from
+   *            render scope would be the first render's range forever: after
+   *            the 1st, an add would re-read last month, and the new expense
+   *            would never show.
+   *   period, range  state, so the top card redraws when either changes. It
+   *            draws the period line and hands the range to the ⋯ sheet.
    *
-   * Set in two places: the first page below, and the month check, through
-   * holdMonth, which writes both so they cannot drift apart.
+   * Set in three places:
+   *
+   *   the first page   the rows initialiser below writes the two refs, and
+   *                    the two state initialisers after it copy them.
+   *   the 1st          the period check, through holdPeriod.
+   *   the ⋯ menu       applyPeriod, through holdPeriod.
+   *
+   * holdPeriod writes all four at once, so they cannot drift apart.
    */
-  const monthRef = useRef<DateRange | null>(null);
+  const periodRef = useRef<Period | null>(null);
+  const rangeRef = useRef<DateRange | null>(null);
 
   const [rows, setRows] = useState<Expense[]>(() => {
     /* Worked out in the same step as the page it scopes, so the two can
-     * never name different months. */
-    monthRef.current = monthOnly ? monthRangeAt(Date.now()) : null;
+     * never name different stretches of time. */
+    periodRef.current = monthOnly || titleOnly !== undefined ? "month" : null;
+    rangeRef.current = rangeOf(periodRef.current, Date.now());
     const t0 = Date.now();
-    const first = readPage(monthRef.current, 0);
+    const first = readPage(rangeRef.current, 0, undefined, titleOnly);
     console.log(
       `[${screen}] first page: ${first.length} rows in ${Date.now() - t0}ms`,
     );
@@ -834,22 +1017,38 @@ export default function ExpenseListScreen({
     return first;
   });
 
-  /* After the rows initialiser, which sets monthRef: React runs state
+  /* After the rows initialiser, which sets rangeRef: React runs state
    * initialisers in the order they are written. */
-  const [totals, setTotals] = useState(() =>
-    readHeaderTotals(monthRef.current),
-  );
+  const [totals, setTotals] = useState(() => {
+    const t0 = Date.now();
+    const first = readHeaderTotals(rangeRef.current, undefined, titleOnly);
+    /*
+     * Printed on every open, like "first page": opening a page four times
+     * gives four readings. The size is in the line because a time means
+     * nothing without the number of expenses it was taken over.
+     */
+    if (__DEV__) {
+      console.log(
+        `[${screen}] first total: ${first.count} expenses in ${Date.now() - t0}ms`,
+      );
+    }
+    return first;
+  });
 
-  const [month, setMonth] = useState<DateRange | null>(
-    () => monthRef.current,
-  );
+  const [period, setPeriod] = useState<Period | null>(() => periodRef.current);
+  const [range, setRange] = useState<DateRange | null>(() => rangeRef.current);
 
-  /* useCallback for the same reason as holdCopy: the month check lists it,
-   * and it only touches a ref and a setter, so it never changes. */
-  const holdMonth = useCallback((range: DateRange) => {
-    monthRef.current = range;
-    setMonth(range);
-  }, []);
+  /* useCallback for the same reason as holdCopy: the period check lists it,
+   * and it only touches refs and setters, so it never changes. */
+  const holdPeriod = useCallback(
+    (nextPeriod: Period | null, nextRange: DateRange | null) => {
+      periodRef.current = nextPeriod;
+      rangeRef.current = nextRange;
+      setPeriod(nextPeriod);
+      setRange(nextRange);
+    },
+    [],
+  );
 
   /*
    * Local midnight at the start of today. Every row reads it to decide
@@ -980,6 +1179,31 @@ export default function ExpenseListScreen({
   const [filter, setFilter] = useState<CategoryChoice>(null);
   const [sheetOpen, setSheetOpen] = useState(false);
   const [formOpen, setFormOpen] = useState(false);
+
+  /*
+   * The title page's period menu: where it opens, counted from the card's
+   * top-left corner, or null while it is closed. Set by openMenu from where
+   * the ⋯ sits in the card; cleared by a pick, a tap outside it, and
+   * Android's back button.
+   */
+  const [menuAt, setMenuAt] = useState<{ top: number; right: number } | null>(
+    null,
+  );
+
+  /*
+   * Where the card sits on the page: its left edge, its top and its width,
+   * from the card's onLayout. Title page only. The menu layer lays a box
+   * over the card with these numbers, and opens the menu inside that box.
+   */
+  const [heroFrame, setHeroFrame] = useState<{
+    x: number;
+    y: number;
+    width: number;
+  } | null>(null);
+
+  /* The card and its ⋯, so openMenu can ask where the ⋯ sits in the card. */
+  const heroRef = useRef<View>(null);
+  const dotsRef = useRef<View>(null);
 
   /*
    * The row being edited, or null.
@@ -1122,9 +1346,9 @@ export default function ExpenseListScreen({
   /*
    * Go back to page one and re-read the total, KEEPING the filter.
    *
-   * Two callers. The focus check below: this copy comes back into focus and
+   * One caller: the focus check below. This copy comes back into focus and
    * the expense version moved while it was hidden — a write on another tab
-   * is the only way that happens. And the month check, on the 1st.
+   * is the only way that happens.
    *
    * It reads `filter` from state. That is only safe where the copy of reload
    * being called was made in a render that already had the current filter —
@@ -1138,11 +1362,11 @@ export default function ExpenseListScreen({
 
     const categoryId = filter?.id;
 
-    const first = readPage(monthRef.current, 0, categoryId);
+    const first = readPage(rangeRef.current, 0, categoryId, titleOnly);
     offsetRef.current = first.length;
     seenRef.current = expenseVersion();
     setRows(first);
-    setTotals(readHeaderTotals(monthRef.current, categoryId));
+    setTotals(readHeaderTotals(rangeRef.current, categoryId, titleOnly));
   };
 
   // Switch filter. Takes the choice as an ARGUMENT, never from state —
@@ -1150,13 +1374,17 @@ export default function ExpenseListScreen({
   // reading it back here would apply the previous tap's category.
   //
   // It reads NO state at all: only its argument, refs, setters, module
-  // functions and endUndoWindow, which never changes. That is what makes it
-  // safe to call from the change listener below, which is created once and
-  // keeps the first render's copy of this function. If this function ever
-  // starts reading state, that listener silently uses the old value.
+  // functions, endUndoWindow, which never changes, and titleOnly, a prop,
+  // which never changes for a copy. That is what makes it safe to call from
+  // the change listener below, which is created once and keeps the first
+  // render's copy of this function. If this function ever starts reading
+  // state, that listener silently uses the old value.
   //
-  // The month reaches it the same way: monthRef is a ref, so even the
-  // listener's first-render copy of this function reads the current month.
+  // The range reaches it the same way: rangeRef is a ref, so even the
+  // listener's first-render copy of this function reads the current range.
+  //
+  // It hands back what it read and how long each read took. Only the title
+  // page's period menu prints them; every other caller ignores them.
   const applyFilter = (choice: CategoryChoice) => {
     /* Page one of a different set, with totals for a different filter. The
      * held row's position belonged to the list being thrown away, so undo
@@ -1165,7 +1393,9 @@ export default function ExpenseListScreen({
 
     const categoryId = choice?.id;
 
-    const first = readPage(monthRef.current, 0, categoryId);
+    const t0 = Date.now();
+    const first = readPage(rangeRef.current, 0, categoryId, titleOnly);
+    const pageMs = Date.now() - t0;
     // Page one of a different set. The offset MUST go back to zero, or
     // switching from one category to another asks for rows 300-350 of a set
     // with none.
@@ -1176,52 +1406,158 @@ export default function ExpenseListScreen({
     setRows(first);
     // The header total narrows with the list. A list showing one category
     // above a total showing everything is a screen that lies quietly.
-    setTotals(readHeaderTotals(monthRef.current, categoryId));
+    const t1 = Date.now();
+    const nextTotals = readHeaderTotals(
+      rangeRef.current,
+      categoryId,
+      titleOnly,
+    );
+    const totalMs = Date.now() - t1;
+    setTotals(nextTotals);
 
     setFilter(choice);
     setSheetOpen(false);
+
+    return {
+      rows: first.length,
+      pageMs,
+      expenses: nextTotals.count,
+      totalMs,
+    };
   };
 
   /*
-   * The month check: when the day changes, did the month change too?
+   * Switch the title page to another period, from its ⋯ menu.
+   *
+   * The range is worked out now and held, so every read until the next
+   * switch, or the next 1st, uses the same stretch of time. Then
+   * applyFilter(null) reads page one and the total for it, with the title,
+   * and ends the undo window: the held row's place belonged to the list
+   * being replaced.
+   *
+   * holdPeriod comes FIRST, because applyFilter reads rangeRef.
+   *
+   * The log line is printed on every pick. The page always opens on this
+   * month, so a year or all time can only be reached from here, and this
+   * line is the only timing they get. The sizes are in it because a time
+   * means nothing without how much was read.
+   */
+  const applyPeriod = (next: Period) => {
+    setMenuAt(null);
+    holdPeriod(next, rangeOf(next, Date.now()));
+    const read = applyFilter(null);
+    if (__DEV__) {
+      console.log(
+        `[${screen}] period: ${next} — ` +
+          `page: ${read.rows} rows in ${read.pageMs}ms, ` +
+          `total: ${read.expenses} expenses in ${read.totalMs}ms`,
+      );
+    }
+  };
+
+  /*
+   * Open the period menu just under the ⋯ that opened it.
+   *
+   * measureLayout asks where the ⋯ sits INSIDE the card. Both are on this
+   * page, so the answer comes only from this page's own layout: the
+   * window, the status bar and the navigator play no part. (The Modal this
+   * replaced needed window numbers, and on the phone the menu landed about
+   * 50 too high.)
+   *
+   * The menu opens 6 below the ⋯'s bottom, its right edge in line with the
+   * ⋯'s right edge, the way YouTube's does. Both numbers are counted from
+   * the card, because the menu is drawn in a box laid over the card (see
+   * the menu layer at the end of the JSX).
+   *
+   * Opening it ends the undo window, the same as opening the ⋯ sheet on
+   * Home.
+   */
+  const openMenu = () => {
+    endUndoWindow("⋯ menu");
+    const hero = heroRef.current;
+    const dots = dotsRef.current;
+    if (!hero || !dots || !heroFrame) return;
+    const cardWidth = heroFrame.width;
+    dots.measureLayout(hero, (left, top, width, height) => {
+      const at = {
+        top: top + height + 6,
+        right: cardWidth - (left + width),
+      };
+      /* Where the menu went, so a menu in the wrong place can be traced to
+       * the numbers it was placed with. */
+      if (__DEV__) {
+        console.log(
+          `[${screen}] menu: ⋯ at ${Math.round(left)}, ${Math.round(top)} ` +
+            `in the card → menu top ${Math.round(at.top)}, ` +
+            `right ${Math.round(at.right)}`,
+        );
+      }
+      setMenuAt(at);
+    });
+  };
+
+  /*
+   * Android's back button closes the menu first. Without this, back would
+   * leave the page instead.
+   *
+   * React Native asks back listeners newest first, and stops at the first
+   * one that returns true. This one is added when the menu opens, after the
+   * navigator's own, so it is asked first. It is removed when the menu
+   * closes. Left behind, it would swallow every back press on this page.
+   */
+  useEffect(() => {
+    if (menuAt === null) return;
+    const sub = BackHandler.addEventListener("hardwareBackPress", () => {
+      setMenuAt(null);
+      return true;
+    });
+    return () => sub.remove();
+  }, [menuAt]);
+
+  /*
+   * The period check: when the day changes, did the period move too?
    *
    * Runs once after the first render, then whenever todayStart changes — at
    * local midnight, and when the app comes back to the front (see refresh
-   * above). On most days the month is the same and it stops after one log
-   * line. On the 1st it moves this copy to the new month and re-reads.
+   * above). On most days nothing moves and it stops after one log line. On
+   * the 1st a month moves; on 1 January a year does. Then it holds the new
+   * range and shows all of it. All time never moves, and All has no period,
+   * so both return at once.
    *
-   * reload, not applyFilter: a filter picked before midnight stays picked.
-   * reload reads `filter` from state, and that is safe here for the same
-   * reason as in the focus check below. This effect is rebuilt on every
-   * render, and React runs the copy from the render where todayStart
-   * changed, which already holds the current filter. reload is deliberately
-   * NOT in the dependency list: it is a new function on every render, and
-   * listing it would run this check on every render.
+   * applyFilter(null), not reload: a new month starts with no category
+   * picked, so the first thing shown of it is all of it. On the title page
+   * there is no category, and applyFilter keeps the title.
    *
-   * holdMonth comes FIRST, because reload reads monthRef.
+   * applyFilter reads no state (see the comment above it), so whichever
+   * render's copy of it this effect holds, it does the same thing. It is
+   * deliberately NOT in the dependency list: it is a new function on every
+   * render, and listing it would run this check on every render.
    *
-   * reload also ends the undo window, and that matters here: an Undo after
-   * the month moved would put last month's expense into this month's list.
+   * holdPeriod comes FIRST, because applyFilter reads rangeRef.
    *
-   * Only Home has a month. On All this returns at once.
+   * applyFilter also ends the undo window, and that matters here: an Undo
+   * after the month moved would put last month's expense into this month's
+   * list. It also closes the ⋯ sheet, if it was left open across midnight.
    */
   useEffect(() => {
-    if (!monthOnly) return;
-    const current = monthRangeAt(todayStart);
-    const was = monthRef.current;
+    const p = periodRef.current;
+    if (p === null || p === "all") return;
+    const current = rangeOf(p, todayStart);
+    if (current === null) return;
+    const was = rangeRef.current;
     const changed = was?.start !== current.start;
     if (__DEV__) {
       console.log(
-        `[${screen}] month check: ${formatMonth(current)} → ` +
+        `[${screen}] ${p} check: ${formatPeriod(p, current)} → ` +
           (changed
-            ? `changed from ${was ? formatMonth(was) : "none"}, reload`
-            : "same month"),
+            ? `changed from ${was ? formatPeriod(p, was) : "none"}, show all`
+            : `same ${p}`),
       );
     }
     if (!changed) return;
-    holdMonth(current);
-    reload();
-  }, [todayStart, monthOnly, screen, holdMonth]);
+    holdPeriod(p, current);
+    applyFilter(null);
+  }, [todayStart, screen, holdPeriod]);
 
   /*
    * The check a copy runs when it comes back into focus: is what I show
@@ -1313,6 +1649,10 @@ export default function ExpenseListScreen({
    *       applyFilter(null) re-reads everything. The only cost is a filter
    *       cleared when nobody expected it.
    *
+   *       On the title page no + is on screen, so this never fires there
+   *       today. If it ever did, applyFilter(null) re-reads the page's own
+   *       title and period: it has no filter to clear.
+   *
    * Only the copy on screen listens. A hidden copy hears nothing, and
    * compares the version once, in the focus check above.
    *
@@ -1351,16 +1691,21 @@ export default function ExpenseListScreen({
   const loadMore = () => {
     // totals.count is the FILTERED count, so this guard already knows when
     // it has reached the end of an empty category. On Home it is also this
-    // month's count.
+    // month's count; on the title page, the title's count in its period.
     if (offsetRef.current >= totals.count) {
       return;
     }
 
     // The filter has to reach here too. Miss it and scrolling to the bottom
     // of one category quietly starts appending another's rows underneath.
-    // The month likewise: without monthRef, page two of October would be
-    // page two of every expense ever.
-    const next = readPage(monthRef.current, offsetRef.current, filter?.id);
+    // The range and the title likewise: without rangeRef, page two of
+    // October would be page two of every expense ever.
+    const next = readPage(
+      rangeRef.current,
+      offsetRef.current,
+      filter?.id,
+      titleOnly,
+    );
     offsetRef.current += next.length;
     setRows((prev) => [...prev, ...next]);
 
@@ -1397,6 +1742,26 @@ export default function ExpenseListScreen({
     },
     [endUndoWindow],
   );
+
+  /* ─── Opening a title's page ────────────────────────────────────────── */
+
+  /*
+   * A tap on a card opens the page for that expense's title.
+   *
+   * The route carries the expense's id, not its title: see
+   * readExpenseTitle in db/expenses.ts for why.
+   *
+   * The page opens OVER the tabs. That blurs this copy, and the
+   * leaving-the-screen effect above ends the undo window, the same as
+   * switching tab does.
+   *
+   * useCallback: a row prop, so it must keep its identity for ExpenseRow's
+   * memo. It reads nothing from this component, so its dependency list is
+   * empty because it really has none.
+   */
+  const openTitle = useCallback((e: Expense) => {
+    router.push({ pathname: "/title/[id]", params: { id: e.id } });
+  }, []);
 
   /* ─── Opening and closing the form ──────────────────────────────────── */
 
@@ -1493,11 +1858,24 @@ export default function ExpenseListScreen({
      * do when it is told after the handler returns. */
     seenRef.current = expenseVersion();
 
-    /* Does this row still belong in what is on screen? With no filter
-     * everything belongs, so it always stays. */
-    const stillInFilter = !filter || filter.id === categoryId;
+    /*
+     * Does this row still belong in what is on screen? Two questions, and
+     * both must be yes:
+     *
+     *   the category   with no filter, every category belongs
+     *   the title      only on the title page: is the new title still the
+     *                  page's title? Compared by sameTitle, which folds A-Z
+     *                  the way the page's query does. "tea" stays on the Tea
+     *                  page; "Coffee" leaves it.
+     *
+     * The period never decides this: created_at is not written, so the row
+     * stays inside whatever stretch of time it was in.
+     */
+    const stillInView =
+      (!filter || filter.id === categoryId) &&
+      (titleOnly === undefined || sameTitle(title, titleOnly));
 
-    if (stillInFilter) {
+    if (stillInView) {
       /*
        * map, not filter. Replaces one element and keeps the array length, so
        * the row stays exactly where it is. created_at was not written, so its
@@ -1532,7 +1910,7 @@ export default function ExpenseListScreen({
       /*
        * THE LINE THAT BREAKS SILENTLY IF IT IS MISSING.
        *
-       * A row left the filtered set, so every row after it in the database
+       * A row left the set on screen, so every row after it in the database
        * moved down one position. This counter says how many rows we have
        * already taken. Leave it one too high and the next page starts one row
        * too late, and that row is never seen.
@@ -1662,78 +2040,174 @@ export default function ExpenseListScreen({
     endUndoWindow("undoDelete");
   };
 
-  const empty = emptyText(filter, month);
+  const empty =
+    titleOnly !== undefined
+      ? titleEmptyText(titleOnly, period)
+      : emptyText(filter, range);
+
+  /*
+   * The card's two lines of words, worked out here so the JSX stays plain.
+   * Both are drawn from `period` and `range`, the same ones the rows were
+   * read with, so the words cannot name a different stretch of time.
+   *
+   *   periodLine   Home: "October 2026". Title page: "October 2026",
+   *                "2026" or "All time". null draws nothing.
+   *   cardLabel    Home: the picked category, or "Spent this month".
+   *                Title page: "Spent this month", "Spent this year" or
+   *                "Spent in total".
+   */
+  const periodLine =
+    titleOnly !== undefined
+      ? formatPeriod(period, range)
+      : range
+        ? formatMonth(range)
+        : null;
+  const cardLabel =
+    titleOnly !== undefined
+      ? periodLabel(period)
+      : filter
+        ? filter.name
+        : range
+          ? "Spent this month"
+          : "Spent Recently";
 
   return (
-    <SafeAreaView style={styles.screen} edges={SAFE_EDGES}>
+    /*
+     * The title page pads all four edges; the tab screens pad three. See
+     * SAFE_EDGES and SAFE_EDGES_ALL.
+     */
+    <SafeAreaView
+      style={styles.screen}
+      edges={titleOnly !== undefined ? SAFE_EDGES_ALL : SAFE_EDGES}
+    >
       {/* With the header gone, the clock and battery sit straight on the
           black page. The system draws them dark by default, which would be
           invisible here, so this asks for light ones. On Android below
           API 31 React Native sets the older SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
           from 31 up it uses WindowInsetsController. Both are covered. */}
       <StatusBar barStyle="light-content" />
-      {/* The top card: what is being shown, how much, and +. Home only.
-          All expenses gets a plain bar with a back button instead, like the
-          Categories screen. */}
+
+      {/* The title page's bar: only ‹, on the black above the card. The
+          title itself is on the card. Back pops this page off the root
+          stack, and Home underneath runs its focus check. */}
+      {titleOnly !== undefined && (
+        <View style={styles.bar}>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Back"
+            onPress={() => router.back()}
+            hitSlop={12}
+          >
+            <Text style={styles.barBack}>‹</Text>
+          </Pressable>
+        </View>
+      )}
+
+      {/* The top card: what is being shown, how much, and +. Home and the
+          title page. All expenses gets a plain bar with a back button
+          instead, like the Categories screen. */}
       {showTopCard ? (
-        <View style={styles.hero}>
+        <View
+          ref={heroRef}
+          style={styles.hero}
+          // Title page only: where the card is on the page, for the menu
+          // layer. Home has no menu, so it skips the extra render.
+          onLayout={
+            titleOnly !== undefined
+              ? (e) => {
+                  const { x, y, width } = e.nativeEvent.layout;
+                  setHeroFrame({ x, y, width });
+                }
+              : undefined
+          }
+        >
           <View style={styles.heroTop}>
-            {/* The 3-dot. When the week filter arrives it opens a small menu
-                first, and this becomes onPress={() => setMenuOpen(true)}. */}
+            {/* The 3-dot. On Home it opens the category sheet; on the title
+                page, the small period menu. dotsRef lets openMenu measure
+                where it sits in the card. */}
             <Pressable
+              ref={dotsRef}
               accessibilityRole="button"
-              accessibilityLabel="Filter by category"
+              accessibilityLabel={
+                titleOnly !== undefined
+                  ? "Choose a period"
+                  : "Filter by category"
+              }
               android_ripple={RIPPLE_ON_LIGHT}
               style={({ pressed }) => [styles.heroIconButton, iosPressed(pressed)]}
-              onPress={() => {
-                endUndoWindow("⋯ sheet");
-                setSheetOpen(true);
-              }}
+              onPress={
+                titleOnly !== undefined
+                  ? openMenu
+                  : () => {
+                      endUndoWindow("⋯ sheet");
+                      setSheetOpen(true);
+                    }
+              }
               hitSlop={12}
             >
               <Ionicons name="ellipsis-horizontal" size={20} color={INK} />
             </Pressable>
           </View>
 
-          {/* The month the list and the total cover. Drawn from `month`,
-              the same range the rows were read with, so the words cannot
-              name a different month. Nothing is drawn without one. */}
-          {month && (
-            <Text style={styles.monthLabel} numberOfLines={1}>
-              {formatMonth(month)}
+          {/* The title page's title, in the white space Home leaves empty
+              above the month. */}
+          {titleOnly !== undefined && (
+            <Text style={styles.heroTitle} numberOfLines={1}>
+              {titleOnly}
+            </Text>
+          )}
+
+          {periodLine !== null && (
+            <Text
+              style={[
+                styles.monthLabel,
+                titleOnly !== undefined && styles.monthLabelUnderTitle,
+              ]}
+              numberOfLines={1}
+            >
+              {periodLine}
             </Text>
           )}
 
           {/* numberOfLines is what actually truncates. Without it a long
               category name wraps to a second line and pushes the total down. */}
           <Text
-            style={[styles.headerLabel, month && styles.headerLabelUnderMonth]}
+            style={[
+              styles.headerLabel,
+              periodLine !== null && styles.headerLabelUnderMonth,
+            ]}
             numberOfLines={1}
           >
-            {filter
-              ? filter.name
-              : month
-                ? "Spent this month"
-                : "Spent Recently"}
+            {cardLabel}
           </Text>
 
           <Text style={styles.headerTotal}>
             {formatMoney(totals.totalMinor, DEFAULT_CURRENCY)}
           </Text>
 
-          {/* The add button. It asks the tab layout for its add sheet — the
-              same sheet the tab bar's + opens, so both buttons add the same
-              way. The undo window ends through this copy's
-              onAddSheetRequested listener (the leaving-the-screen effect). */}
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="Add expense"
-            android_ripple={RIPPLE}
-            style={({ pressed }) => [styles.heroAdd, iosPressed(pressed)]}
-            onPress={requestAddSheet}
-          >
-            <Ionicons name="add" size={30} color="#FFFFFF" />
-          </Pressable>
+          {titleOnly !== undefined ? (
+            /* The count sits where Home has its +. Its box has no fixed
+               height, so this card is shorter than Home's. */
+            <View style={styles.heroCountBox}>
+              <Text style={styles.heroCount}>
+                {`${totals.count} ${totals.count === 1 ? "expense" : "expenses"}`}
+              </Text>
+            </View>
+          ) : (
+            /* The add button. It asks the tab layout for its add sheet — the
+               same sheet the tab bar's + opens, so both buttons add the same
+               way. The undo window ends through this copy's
+               onAddSheetRequested listener (the leaving-the-screen effect). */
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Add expense"
+              android_ripple={RIPPLE}
+              style={({ pressed }) => [styles.heroAdd, iosPressed(pressed)]}
+              onPress={requestAddSheet}
+            >
+              <Ionicons name="add" size={30} color="#FFFFFF" />
+            </Pressable>
+          )}
         </View>
       ) : (
         <View style={styles.bar}>
@@ -1831,8 +2305,10 @@ export default function ExpenseListScreen({
              */
             extraData={`${leavingId}|${restoredId}|${todayStart}|${clock24}`}
             /*
-             * Two different empty screens. An empty app needs "add one"; an
+             * Different empty screens. An empty app needs "add one"; an
              * empty filter needs the way back out, so only it gets Show all.
+             * The title page's empty month or year gets Show all time, its
+             * way out.
              *
              * No flash at launch: the first page is read inside useState's
              * initialiser, before the first render, so `rows` is never [] for
@@ -1860,6 +2336,20 @@ export default function ExpenseListScreen({
                     <Text style={styles.emptyActionText}>Show all</Text>
                   </Pressable>
                 )}
+                {titleOnly !== undefined && period !== "all" && (
+                  <Pressable
+                    accessibilityRole="button"
+                    android_ripple={RIPPLE_ROUND}
+                    style={({ pressed }) => [
+                      styles.emptyAction,
+                      iosPressed(pressed),
+                    ]}
+                    onPress={() => applyPeriod("all")}
+                    hitSlop={12}
+                  >
+                    <Text style={styles.emptyActionText}>Show all time</Text>
+                  </Pressable>
+                )}
               </View>
             }
             // Both Empty and Footer render when there is no data, so an empty
@@ -1881,6 +2371,7 @@ export default function ExpenseListScreen({
                 onEdit={openEdit}
                 onDelete={deleteRow}
                 onWillOpen={closePreviousRow}
+                onOpen={titleOnly === undefined ? openTitle : null}
               />
             )}
           />
@@ -1991,23 +2482,28 @@ export default function ExpenseListScreen({
       )}
       */}
 
-      <CategorySheet
-        visible={sheetOpen}
-        // The same range the list and the total behind the sheet were read
-        // with, so its numbers cover the same stretch of time. A state
-        // object, the same one on every render until the month changes.
-        range={month}
-        selectedId={filter?.id ?? null}
-        onSelect={applyFilter}
-        onClose={() => setSheetOpen(false)}
-        onManage={() => {
-          // Close FIRST. CategorySheet is a react-native Modal, which draws
-          // above the navigator — push while it is open and it stays on top
-          // of the screen you just pushed.
-          setSheetOpen(false);
-          router.push("/categories" as never);
-        }}
-      />
+      {/* The category sheet is Home's ⋯. The title page's ⋯ opens the
+          period menu below instead, so the sheet is not drawn there at
+          all. */}
+      {titleOnly === undefined && (
+        <CategorySheet
+          visible={sheetOpen}
+          // The same range the list and the total behind the sheet were read
+          // with, so its numbers cover the same stretch of time. A state
+          // object, the same one on every render until the month changes.
+          range={range}
+          selectedId={filter?.id ?? null}
+          onSelect={applyFilter}
+          onClose={() => setSheetOpen(false)}
+          onManage={() => {
+            // Close FIRST. CategorySheet is a react-native Modal, which draws
+            // above the navigator — push while it is open and it stays on top
+            // of the screen you just pushed.
+            setSheetOpen(false);
+            router.push("/categories" as never);
+          }}
+        />
+      )}
 
       <BottomSheet visible={formOpen} title="Edit expense" onClose={closeForm}>
         {/*
@@ -2025,6 +2521,67 @@ export default function ExpenseListScreen({
           onSubmit={submitExpense}
         />
       </BottomSheet>
+
+      {/*
+        The title page's period menu: a small box under the ⋯, like
+        YouTube's.
+
+        NOT a Modal. A Modal is its own window, and on the phone its numbers
+        and this page's numbers did not line up: the menu opened about 50
+        too high, over the ⋯. This layer is part of the page, so the card's
+        numbers and the menu's numbers are the same numbers.
+
+        It is the LAST thing on the page, so it draws over everything else
+        here, the list included. Three parts:
+
+          the Pressable    fills the page behind the menu. A tap anywhere
+                           outside the menu closes it.
+          the box          lies exactly over the card, from heroFrame, and
+                           reaches to the bottom of the page so the menu
+                           always fits inside it. box-none lets taps
+                           through it to the Pressable.
+          the menu         sits in that box at menuAt.
+
+        YOURS TO RESTYLE: menu, menuItem, menuItemDivider, menuText in the
+        styles below.
+      */}
+      {titleOnly !== undefined && menuAt && heroFrame && (
+        <View style={StyleSheet.absoluteFill}>
+          <Pressable
+            style={StyleSheet.absoluteFill}
+            accessibilityLabel="Close the menu"
+            onPress={() => setMenuAt(null)}
+          />
+          <View
+            style={[
+              styles.menuOverCard,
+              { top: heroFrame.y, left: heroFrame.x, width: heroFrame.width },
+            ]}
+          >
+            <View
+              accessibilityRole="menu"
+              style={[styles.menu, { top: menuAt.top, right: menuAt.right }]}
+            >
+              {PERIODS.map((p, i) => (
+                <Pressable
+                  key={p.key}
+                  accessibilityRole="menuitem"
+                  android_ripple={RIPPLE}
+                  style={({ pressed }) => [
+                    styles.menuItem,
+                    // A line between rows: above every row but the first.
+                    i > 0 && styles.menuItemDivider,
+                    iosPressed(pressed),
+                  ]}
+                  onPress={() => applyPeriod(p.key)}
+                >
+                  <Text style={styles.menuText}>{p.label}</Text>
+                </Pressable>
+              ))}
+            </View>
+          </View>
+        </View>
+      )}
     </SafeAreaView>
   );
 }
@@ -2116,8 +2673,63 @@ const styles = StyleSheet.create({
     overflow: "hidden",
   },
 
-  // YOURS TO RESTYLE — the All expenses bar. Copied from the Categories
-  // screen's header, so the two read as the same kind of screen.
+  /*
+   * YOURS TO RESTYLE — the title page's card. Shorter than Home's on
+   * purpose: 8 above the title, 16 between the title and the month, and 10
+   * between the total and the count.
+   */
+  heroTitle: {
+    color: INK,
+    fontSize: 30,
+    fontWeight: "700",
+    marginTop: 8,
+    // Centred text still needs a limit, or numberOfLines has no width to
+    // truncate at.
+    maxWidth: "100%",
+  },
+  monthLabelUnderTitle: { marginTop: 16 },
+  /*
+   * No height, so the box is exactly as tall as the count's text.
+   * justifyContent: "center" went with the height: it only centres inside
+   * spare height, and there is none now.
+   */
+  heroCountBox: { marginTop: 10 },
+  heroCount: { color: "#6E6E73", fontSize: 13 },
+
+  /*
+   * The box the menu layer lays over the card. Its top, left and width
+   * come from heroFrame; bottom: 0 stretches it to the bottom of the page,
+   * so the menu fits inside it however short the card gets. box-none: the
+   * box itself takes no taps, the menu inside it does.
+   */
+  menuOverCard: { position: "absolute", bottom: 0, pointerEvents: "box-none" },
+  /*
+   * YOURS TO RESTYLE — the title page's period menu.
+   *
+   * No width: an absolute box with only top and right set is as wide as its
+   * widest row. overflow: hidden keeps the rows' ripples inside the rounded
+   * corners. elevation gives it Android's shadow.
+   */
+  menu: {
+    position: "absolute",
+    paddingVertical: 6,
+    borderRadius: 12,
+    backgroundColor: "#2C2C2E",
+    overflow: "hidden",
+    elevation: 8,
+  },
+  menuItem: { paddingVertical: 12, paddingHorizontal: 16 },
+   /* 1, not StyleSheet.hairlineWidth: a hairline is one physical pixel,
+   * 0.38 on a Pixel 8, and too thin to see on this dark grey. */
+  menuItemDivider: {
+    borderTopWidth: 1,
+    borderTopColor: "#636366",
+  },
+  menuText: { color: "#FFFFFF", fontSize: 16 },
+
+  // YOURS TO RESTYLE — the All expenses bar, and the title page's ‹ above
+  // its card. Copied from the Categories screen's header, so they read as
+  // the same kind of screen.
   bar: {
     flexDirection: "row",
     alignItems: "center",
@@ -2170,9 +2782,14 @@ const styles = StyleSheet.create({
   rowGap: { marginBottom: 10 },
 
   /*
-   * YOURS TO RESTYLE — the expense card. One thing here is mechanism:
-   * backgroundColor must stay opaque. The swipe buttons sit behind the card,
-   * and a see-through card would show them through the text mid-slide.
+   * YOURS TO RESTYLE — the expense card. Two things here are mechanism:
+   *
+   *   backgroundColor  must stay opaque. The swipe buttons sit behind the
+   *                    card, and a see-through card would show them through
+   *                    the text mid-slide.
+   *   overflow         keeps the tap ripple inside the rounded corners, as
+   *                    on the round buttons. The card has no shadow, so on
+   *                    iOS it cuts nothing off.
    */
   card: {
     flexDirection: "row",
@@ -2182,6 +2799,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     borderRadius: 16,
     backgroundColor: "#1C1C1E",
+    overflow: "hidden",
   },
   iconCircle: {
     width: 40,

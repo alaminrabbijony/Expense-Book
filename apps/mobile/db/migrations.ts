@@ -164,4 +164,65 @@ export const MIGRATIONS: string[] = [
   CREATE INDEX IF NOT EXISTS idx_expenses_category_created_at_id
     ON expenses (category_id, created_at DESC, id DESC);
   `,
+  
+  // 6 -> 7  ·  The index for the per-title page.
+  //
+  //   title FIRST, then the sort columns. Same shape and same reasoning as
+  //   idx_expenses_category_created_at_id: one walk down the index serves
+  //   the WHERE and the ORDER BY together, so no page pays for a temp
+  //   B-tree. An index on title alone was measured and rejected — it serves
+  //   the WHERE, hands the sort back, and both pages get slower.
+  //
+  //   COLLATE NOCASE is load-bearing, not decoration. Every query that
+  //   matches a title compares with COLLATE NOCASE, and an index declared
+  //   without it is ignored by all of them. That version was built on
+  //   purpose during the measurement: the index exists, costs its disk and
+  //   its write time on every insert, and every plan stays exactly as it
+  //   was. Nothing throws. The rows still come back correct. Only
+  //   EXPLAIN QUERY PLAN can tell the difference.
+  //
+    //   Measured before and after, Pixel 8 emulator (API 36), development
+  //   build, 50,036 rows, one title holding 5,000 of them, warm medians:
+  //
+  //                                       before    after
+  //     this title, this year  total       46ms       6ms   <- the reason
+  //     this title, this year  page      14.5ms       6ms
+  //     this title, all time   total       6.5ms      8ms
+  //     this title, all time   page        15ms       6ms
+  //     this title, this month total         2ms      1ms
+  //
+  //   Only the first two gaps beat their own spread. The year total is what
+  //   this index is for: 7.7x, and it was the slowest thing on the page.
+  //
+  //   The all-time total did NOT get faster, and that is not a mistake. It
+  //   traded a straight read of all 50,036 rows for 5,000 index seeks plus
+  //   5,000 fetches back into the table to get each amount. One tenth the
+  //   rows, scattered instead of sequential, and the two came out even.
+  //   Putting amount_minor in this index would answer that total from the
+  //   index alone — rejected, because it also pulls the all-expenses total
+  //   onto this index, and that query has no before-number.
+  //
+  //   The year was the slow one while reading FEWER rows. Its plan used
+  //   idx_expenses_created_at_id, which holds created_at and id and nothing
+  //   else, so every row inside the year range had to be fetched out of the
+  //   table to read its title and its amount. All time had no index it
+  //   could use, read the table straight through in file order, and fetched
+  //   nothing extra. Sequential beat scattered.
+  //
+  //   suggestCategory gains more than the title page does. It matches on
+  //   title too, it runs on every title blur in the add form, and it was
+  //   reading the whole table to do it.
+  //
+  //   amount_minor is deliberately NOT a fourth column here. It would let
+  //   the totals be answered from the index without touching the table at
+  //   all, but it also pulls the all-expenses total onto this index — a
+  //   query this change is not measuring and has no before-number for.
+  //
+  //   IF NOT EXISTS, same reasoning as 2 -> 3 and 5 -> 6. An index holds no
+  //   data of its own, so "already there" and "just built" are the same
+  //   database.
+  `
+  CREATE INDEX IF NOT EXISTS idx_expenses_title_created_at_id
+    ON expenses (title COLLATE NOCASE, created_at DESC, id DESC);
+  `,
 ];
