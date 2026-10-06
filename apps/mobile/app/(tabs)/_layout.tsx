@@ -24,16 +24,25 @@ type IconName = ComponentProps<typeof Ionicons>["name"];
  *
  * `color` and `size` come from the tab bar, so the active and inactive
  * colours in TAB_OPTIONS reach the icon without being repeated here.
+ *
+ * The returned function is NAMED, and the name is lower case on purpose. The
+ * tab bar calls it — `renderIcon({ focused, size, color })` — rather than
+ * mounting it, so it is a render function and not a component, and a
+ * PascalCase name would claim otherwise. Anonymous, it also showed up in a
+ * stack trace with no name at all.
  */
-const tabIcon =
-  (
-    filled: IconName,
-    outline: IconName,
-  ): BottomTabNavigationOptions["tabBarIcon"] =>
-  ({ focused, color, size }) => (
-    <Ionicons name={focused ? filled : outline} size={size} color={color} />
-  );
+const tabIcon = (
+  filled: IconName,
+  outline: IconName,
+): BottomTabNavigationOptions["tabBarIcon"] =>
+  function renderTabIcon({ focused, color, size }) {
+    return (
+      <Ionicons name={focused ? filled : outline} size={size} color={color} />
+    );
+  };
 
+
+  
 /*
  * Options for every tab. YOURS TO RESTYLE: the colours.
  *
@@ -166,8 +175,8 @@ export default function TabsLayout() {
     <>
       {/* The order of the screens here is the order in the bar. */}
       <Tabs screenOptions={TAB_OPTIONS}>
-        <Tabs.Screen name="index" options={HOME_OPTIONS} />
-        <Tabs.Screen name="all" options={ALL_OPTIONS} />
+                <Tabs.Screen name="(home)" options={HOME_OPTIONS} />
+                <Tabs.Screen name="(all)" options={ALL_OPTIONS} />
         <Tabs.Screen name="add" options={ADD_OPTIONS} />
         <Tabs.Screen name="categories" options={CATEGORIES_OPTIONS} />
         <Tabs.Screen name="settings" options={SETTINGS_OPTIONS} />

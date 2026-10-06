@@ -6,16 +6,21 @@ import { Pressable, StatusBar, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
 /*
- * The title page's route: /title/<an expense's id>.
+ * The body of the title page: /title/<an expense's id>.
  *
- * This file sits outside app/(tabs), so the page opens OVER the tabs, on
- * the root stack, with no tab bar and so no +.
+ * It lives in comp/ rather than in app/ because TWO routes render it, one in
+ * each tab's stack. Two copies of this file would drift apart; one copy behind
+ * two one-line routes cannot.
  *
- * The page itself is the list screen Home and All use, in title mode: the
- * same card, the same swipe Edit and Delete, the same Undo. This file only
- * turns the id into a title.
+ * Each of those routes sits inside its tab's own stack, so the page is pushed
+ * INSIDE that tab. The tab bar stays on screen, which is what gives this page
+ * a + at all.
+ *
+ * The page itself is the list screen Home and All use, in title mode: the same
+ * card, the same swipe Edit and Delete, the same Undo. This file only turns the
+ * id into a title.
  */
-export default function TitleRoute() {
+export default function TitlePage() {
   /*
    * useLocalSearchParams is typed by the generic below, not checked when the
    * app runs. So the typeof makes sure only a string reaches the read.
@@ -35,7 +40,7 @@ export default function TitleRoute() {
   if (title === null) {
     /* The expense was deleted before the page could read it. */
     return (
-      <SafeAreaView style={styles.screen}>
+      <SafeAreaView style={styles.screen} edges={SAFE_EDGES}>
         <StatusBar barStyle="light-content" />
         <View style={styles.bar}>
           <Pressable
@@ -59,6 +64,13 @@ export default function TitleRoute() {
 
   return <ExpenseListScreen screen="title" showTopCard titleOnly={title} />;
 }
+
+/*
+ * No "bottom". SafeAreaView pads by its provider's insets, not by where the
+ * view sits, and the tab bar already pads the bottom of everything inside the
+ * tabs. Keeping "bottom" here would stack a second gap on top of the bar's.
+ */
+const SAFE_EDGES = ["top", "left", "right"] as const;
 
 /* YOURS TO RESTYLE. The same values as the list screen's bar and empty
  * text, so the gone page looks like the rest of the app. */
