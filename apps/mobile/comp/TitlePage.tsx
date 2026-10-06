@@ -1,7 +1,8 @@
+import { holdAddSheetTitle } from "@/comp/addSheet";
 import ExpenseListScreen from "@/comp/ExpenseListScreen";
 import { readExpenseTitle } from "@/db/expenses";
-import { router, useLocalSearchParams } from "expo-router";
-import { useState } from "react";
+import { router, useFocusEffect, useLocalSearchParams } from "expo-router";
+import { useCallback, useState } from "react";
 import { Pressable, StatusBar, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
@@ -35,6 +36,30 @@ export default function TitlePage() {
    */
   const [title] = useState(() =>
     typeof id === "string" ? readExpenseTitle(id) : null,
+  );
+
+  /*
+   * While this page is the one in front, the tab bar's + fills this title in.
+   *
+   * useFocusEffect rather than useEffect, because a title page stays mounted
+   * when you switch tab. Two of them can be mounted at once, one per stack,
+   * and only the focused one should be answering. The cleanup runs on blur, so
+   * leaving the page hands the + back to an empty form.
+   *
+   * The add sheet is a Modal — its own window, but the same React tree — so
+   * opening it does not blur this page and the title stays held.
+   *
+   * Nothing is returned when there is no title, rather than null:
+   * useFocusEffect warns in development on any return value but a function or
+   * undefined.
+   *
+   * Above the early return on purpose. A hook cannot run conditionally.
+   */
+  useFocusEffect(
+    useCallback(() => {
+      if (title === null) return;
+      return holdAddSheetTitle(title);
+    }, [title]),
   );
 
   if (title === null) {

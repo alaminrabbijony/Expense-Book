@@ -1,4 +1,8 @@
-import { onAddSheetRequested, requestAddSheet } from "@/comp/addSheet";
+import {
+  addSheetTitle,
+  onAddSheetRequested,
+  requestAddSheet,
+} from "@/comp/addSheet";
 import BottomSheet from "@/comp/BottomSheet";
 import ExpenseForm from "@/comp/ExpenseForm";
 import { insertExpense } from "@/db/expenses";
@@ -41,8 +45,6 @@ const tabIcon = (
     );
   };
 
-
-  
 /*
  * Options for every tab. YOURS TO RESTYLE: the colours.
  *
@@ -143,23 +145,43 @@ export default function TabsLayout() {
   const [addOpen, setAddOpen] = useState(false);
 
   /*
+   * The title the sheet should open with, or null for an empty form.
+   *
+   * Written in the same handler as setAddOpen, so React applies both in one
+   * render and the form mounts already knowing. It is overwritten on every
+   * open, so a title left behind by an earlier one cannot leak into the next.
+   */
+  const [prefillTitle, setPrefillTitle] = useState<string | null>(null);
+
+  /*
    * Opens the sheet when either + asks. The layout never unmounts, so this
    * listens for the life of the app.
+   *
+   * The title is read HERE, the moment a + is pressed, rather than handed
+   * over by whoever pressed it. Neither button knows what is on screen: the
+   * tab bar's is drawn by the navigator, and Home's sits inside a screen.
+   * The page in front registers itself instead, and this asks.
    *
    * Returning the unsubscribe makes it this effect's cleanup. A hot update
    * re-runs effects, and runs the cleanup first, so there is never a second
    * listener opening the sheet twice.
    */
-  useEffect(() => onAddSheetRequested(() => setAddOpen(true)), []);
+  useEffect(
+    () =>
+      onAddSheetRequested(() => {
+        setPrefillTitle(addSheetTitle());
+        setAddOpen(true);
+      }),
+    [],
+  );
 
   /*
    * The add write.
    *
-   * KNOWN ISSUE: NOTHING HAPPENS AFTER IT, and that is the point of this
-   * step. insertExpense bumps the expense counter, but no list screen listens
-   * yet, so no list on any tab shows the new expense until the app restarts.
-   * That is the one write several screens have to hear about, with nobody
-   * listening.
+   * Nothing re-reads here. insertExpense bumps the expense change counter
+   * after the write succeeds, and the list screen that is in front hears
+   * that and re-reads itself. This layout owns no list, so it has nothing
+   * of its own to refresh.
    */
   const addExpense = (
     title: string,
@@ -175,8 +197,8 @@ export default function TabsLayout() {
     <>
       {/* The order of the screens here is the order in the bar. */}
       <Tabs screenOptions={TAB_OPTIONS}>
-                <Tabs.Screen name="(home)" options={HOME_OPTIONS} />
-                <Tabs.Screen name="(all)" options={ALL_OPTIONS} />
+        <Tabs.Screen name="(home)" options={HOME_OPTIONS} />
+        <Tabs.Screen name="(all)" options={ALL_OPTIONS} />
         <Tabs.Screen name="add" options={ADD_OPTIONS} />
         <Tabs.Screen name="categories" options={CATEGORIES_OPTIONS} />
         <Tabs.Screen name="settings" options={SETTINGS_OPTIONS} />
@@ -186,7 +208,7 @@ export default function TabsLayout() {
           it draws in its own window, above the tabs and the tab bar.
 
           ExpenseForm unmounts whenever the Modal hides, so every open is a
-          fresh, empty form. */}
+          fresh form, and initialTitle is read fresh with it. */}
       <BottomSheet
         visible={addOpen}
         title="New expense"
@@ -194,6 +216,7 @@ export default function TabsLayout() {
       >
         <ExpenseForm
           initial={null}
+          initialTitle={prefillTitle}
           submitLabel="Add expense"
           onSubmit={addExpense}
         />

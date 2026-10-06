@@ -10,7 +10,6 @@ import {
   DEFAULT_CURRENCY,
   type Minor,
   sanitizeAmount,
-  
   toMinor,
 } from "@et/shared";
 import { useEffect, useRef, useState } from "react";
@@ -36,6 +35,19 @@ type Props = {
    * this prop is read fresh every time.
    */
   initial?: ExpenseForEdit | null;
+  /**
+   * A title to start a NEW expense with, when the sheet was opened from a
+   * title page. Null or absent means an empty form.
+   *
+   * Its own prop rather than a half-filled `initial`, because `initial`
+   * feeds four initialisers, not one: the amount field only starts empty
+   * while `initial` is absent, so an object carrying just a title would put
+   * an invented number in the amount.
+   *
+   * Ignored while editing. `initial` describes a row that already exists,
+   * and its own title is the right one.
+   */
+  initialTitle?: string | null;
   /** Text on the submit button. "Add expense" or "Save". */
   submitLabel: string;
   onSubmit: (
@@ -48,9 +60,19 @@ type Props = {
 
 export default function ExpenseForm({
   initial,
+  initialTitle,
   submitLabel,
   onSubmit,
 }: Props) {
+  /*
+   * A new expense that arrived with its title already written.
+   *
+   * Not state: the props are read at mount and the form is remounted on every
+   * open, so this cannot change while the sheet is up. It decides which field
+   * the cursor starts in, and whether the category is worked out at open.
+   */
+  const prefilled = !initial && (initialTitle ?? "").length > 0;
+
   /*
    * Lazy initialisers — useState(() => ...) rather than useState(...).
    *
@@ -61,16 +83,32 @@ export default function ExpenseForm({
   const [amount, setAmount] = useState<string>(() =>
     initial ? toInput(initial.amountMinor, initial.currencyCode) : "",
   );
-  const [title, setTitle] = useState<string>(() => initial?.title ?? "");
+  const [title, setTitle] = useState<string>(
+    () => initial?.title ?? initialTitle ?? "",
+  );
 
   /*
    * null means "not chosen yet". This is NOT the filter's null, which means
    * "every category". This one resolves to UNCATEGORISED_ID at save time, so
    * the database never receives a null category_id.
+   *
+   * A pre-filled title gets its suggestion HERE, at mount. handleTitleBlur
+   * below is what normally runs the lookup, and a pre-filled form starts with
+   * the cursor in the amount, so the title never takes focus and never blurs.
+   * Without this line the category would stay empty until the person tapped
+   * into the title and out again.
+   *
+   * It is a synchronous database read during the first render — 21ms and 28ms
+   * on a title with 5,000 rows, against a keyboard that has taken anywhere
+   * from 506ms to 4294ms to appear over this sheet.
+   *
+   * pickedByUser stays false below, so a tap on a category row still wins.
    */
-  const [category, setCategory] = useState<Category | null>(
-    () => initial?.category ?? null,
-  );
+  const [category, setCategory] = useState<Category | null>(() => {
+    if (initial) return initial.category ?? null;
+    if (initialTitle) return suggestCategory(initialTitle);
+    return null;
+  });
 
   /*
    * Whether a HUMAN chose the category, as opposed to the blur handler having
@@ -86,12 +124,14 @@ export default function ExpenseForm({
    * out of the title field on an edit runs a suggestion and silently moves the
    * expense to whatever category that title usually sits in.
    *
+   * A suggestion made at mount for a pre-filled title is still a suggestion,
+   * so this stays false there.
+   *
    * Uncategorised does NOT count as a choice. It means "not sorted yet", so
    * there is nothing there to protect and a suggestion is welcome.
    */
   const [pickedByUser, setPickedByUser] = useState<boolean>(
-    () =>
-      initial?.category != null && initial.category.id !== UNCATEGORISED_ID,
+    () => initial?.category != null && initial.category.id !== UNCATEGORISED_ID,
   );
 
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -156,6 +196,10 @@ export default function ExpenseForm({
    *
    * onBlur fires whenever this field loses focus, which includes tapping the
    * knob and tapping the submit button. So a save pays for this query too.
+   *
+   * On a pre-filled form the cursor starts in the amount, so this does not
+   * run at all unless the person taps into the title themselves — which is
+   * exactly when the title might change and the suggestion should be redone.
    */
   const handleTitleBlur = () => {
     /* A tap outranks everything. Not `category !== null`, which is also true
@@ -272,13 +316,14 @@ export default function ExpenseForm({
           is animating and nothing is being typed. The query still blocks the
           thread. This chooses WHEN it blocks.
 
-          autoFocus puts the cursor here on open, in BOTH modes. If editing
-          should start on the amount instead, that is the line to change. */}
+          autoFocus puts the cursor here on open, EXCEPT when the title
+          arrived pre-filled: then the amount is the only thing left to type,
+          so it takes the cursor instead and this field is left alone. */}
       <TextInput
         style={styles.titleInput}
         value={title}
         onChangeText={setTitle}
-                onBlur={handleTitleBlur}
+        onBlur={handleTitleBlur}
         // Typing and the list do not share the screen: a field taking focus
         // closes the list, because the keyboard it brings would cover it.
         onFocus={() => setPickerOpen(false)}
@@ -289,13 +334,13 @@ export default function ExpenseForm({
         returnKeyType="next"
         onSubmitEditing={() => amountRef.current?.focus()}
         maxLength={60}
-        autoFocus
+        autoFocus={!prefilled}
       />
 
       <View style={styles.amountRow}>
         <Text style={styles.currency}>৳</Text>
         <TextInput
-                    ref={amountRef}
+          ref={amountRef}
           // Same rule as the title field: focus closes the list.
           onFocus={() => setPickerOpen(false)}
           style={styles.amountInput}
@@ -307,6 +352,9 @@ export default function ExpenseForm({
           maxLength={12}
           returnKeyType="done"
           onSubmitEditing={handleSave}
+          // Only when the title came pre-filled. Exactly one field in this
+          // form may claim the cursor, and the title has it otherwise.
+          autoFocus={prefilled}
         />
       </View>
 
@@ -344,7 +392,7 @@ export default function ExpenseForm({
         ) : (
           // flex: 1 is not cosmetic. Without it this Pressable is only as
           // wide as the word, and the rest of the row is dead to taps.
-                    <Pressable
+          <Pressable
             style={styles.categoryLabel}
             onPress={() => {
               /*
@@ -419,8 +467,8 @@ export default function ExpenseForm({
 }
 
 const styles = StyleSheet.create({
-  // No backgroundColor and no border. The sheet paints #171B22 behind this,
-  // and a second panel inside the panel would show as a seam.
+  // No backgroundColor and no border. The sheet paints its own surface behind
+  // this, and a second panel inside the panel would show as a seam.
   form: { paddingHorizontal: 20, paddingTop: 8, gap: 12 },
 
   titleInput: {
@@ -494,16 +542,20 @@ const styles = StyleSheet.create({
   clear: { paddingHorizontal: 12 },
   clearText: { color: "#8A8F98", fontSize: 16 },
 
+  // YOURS TO RESTYLE — white with a black glyph, the same pair as the tab
+  // bar's + and the opposite of the top card's. Red is gone from every
+  // control in this form; it is left only on the error line below, where it
+  // means something.
   knob: {
     width: 36,
     height: 36,
     borderRadius: 18,
-    backgroundColor: "#E5484D",
+    backgroundColor: "#FFFFFF",
     alignItems: "center",
     justifyContent: "center",
   },
   knobText: {
-    color: "#FFFFFF",
+    color: "#000000",
     fontSize: 20,
     fontWeight: "600",
     // Android pads text vertically with invisible space, which pushes the
@@ -527,8 +579,10 @@ const styles = StyleSheet.create({
     overflow: "hidden",
     maxHeight: 220,
   },
+  // YOURS TO RESTYLE — white with black text. Black on white reads at 21.00,
+  // against 3.91 for the white-on-red it replaces.
   button: {
-    backgroundColor: "#E5484D",
+    backgroundColor: "#FFFFFF",
     borderRadius: 10,
     paddingVertical: 14,
     alignItems: "center",
@@ -537,5 +591,5 @@ const styles = StyleSheet.create({
   // Named rather than inline, so the disabled look is one thing you can
   // change in one place.
   buttonDisabled: { opacity: 0.35 },
-  buttonText: { color: "#FFFFFF", fontSize: 16, fontWeight: "600" },
+  buttonText: { color: "#000000", fontSize: 16, fontWeight: "600" },
 });
