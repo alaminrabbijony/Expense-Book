@@ -166,6 +166,33 @@ export default function ExpenseForm({
   const amountRef = useRef<TextInput>(null);
 
   /*
+   * The moment this form mounted, which is the moment the sheet opened: a
+   * hidden Modal renders null, so every open is a fresh mount.
+   *
+   * The sheet's own `keyboard show` line counts from the same moment, so the
+   * gap between the two lines is what the keyboard costs and nothing else.
+   * With only the keyboard line, a tap made by a person sits inside that
+   * number and cannot be told apart from a slow keyboard.
+   *
+   * Lazy useState, like every initialiser above, so a re-render cannot move
+   * the start time.
+   */
+  const [openedAt] = useState(() => Date.now());
+
+  /*
+   * The name passed in says which keyboard the field asks for, so one line
+   * reports both which field took the cursor and which keyboard should have
+   * followed it.
+   */
+  const logFocus = (which: string) => {
+    if (__DEV__) {
+      console.log(
+        `field focused: ${which}, ${Date.now() - openedAt}ms after the sheet opened`,
+      );
+    }
+  };
+
+  /*
    * configureNext applies to the NEXT render only, so it has to be called
    * immediately before the setState that changes the shape.
    *
@@ -326,7 +353,10 @@ export default function ExpenseForm({
         onBlur={handleTitleBlur}
         // Typing and the list do not share the screen: a field taking focus
         // closes the list, because the keyboard it brings would cover it.
-        onFocus={() => setPickerOpen(false)}
+        onFocus={() => {
+          logFocus("title (default keyboard)");
+          setPickerOpen(false);
+        }}
         placeholder="What for?"
         placeholderTextColor="#4A4F58"
         // "next", not "done". This key does not save — it moves to the
@@ -342,7 +372,10 @@ export default function ExpenseForm({
         <TextInput
           ref={amountRef}
           // Same rule as the title field: focus closes the list.
-          onFocus={() => setPickerOpen(false)}
+          onFocus={() => {
+            logFocus("amount (decimal-pad)");
+            setPickerOpen(false);
+          }}
           style={styles.amountInput}
           value={amount}
           onChangeText={(t) => setAmount(sanitizeAmount(t, currencyCode))}
@@ -436,10 +469,18 @@ export default function ExpenseForm({
 
       {pickerOpen ? (
         <View style={styles.pickerBox}>
-          <CategoryList
+                   <CategoryList
             // No null item, so no "All categories" row. That is the entire
             // difference between this list and the filter's.
-            items={categories.map((c) => ({ id: c.id, name: c.name }))}
+            //
+            // A line BETWEEN rows, so the last one does not get one: the
+            // box's own edge is already there, and a line on top of it reads
+            // as a second edge.
+            items={categories.map((c, i) => ({
+              id: c.id,
+              name: c.name,
+              dividerAfter: i < categories.length - 1,
+            }))}
             selectedId={category?.id ?? null}
             onSelect={(item) => {
               // item.id is nullable in the shared type because the filter
@@ -474,7 +515,10 @@ const styles = StyleSheet.create({
   titleInput: {
     color: "#ECEDEE",
     fontSize: 16,
-    backgroundColor: "#0F1115",
+    // The app's list-card colour. It reads at 1.23 against the sheet's black,
+    // which is the same card-on-page pair the list screens use. Against the
+    // sheet's old #171B22 this same colour read at 1.01 — no edge at all.
+    backgroundColor: "#1C1C1E",
     borderRadius: 10,
     paddingHorizontal: 14,
     paddingVertical: 14,
@@ -483,7 +527,7 @@ const styles = StyleSheet.create({
   amountRow: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#0F1115",
+    backgroundColor: "#1C1C1E",
     borderRadius: 10,
     paddingHorizontal: 14,
   },
@@ -511,7 +555,7 @@ const styles = StyleSheet.create({
     minHeight: 52,
     borderRadius: 10,
     padding: 8,
-    backgroundColor: "#0F1115",
+    backgroundColor: "#1C1C1E",
   },
   // The ONLY difference between the two states is which way the row runs.
   categoryRowClosed: { flexDirection: "row-reverse" },
@@ -574,7 +618,7 @@ const styles = StyleSheet.create({
   // Without the limit the box grows to the height of every category and
   // pushes the button down.
   pickerBox: {
-    backgroundColor: "#0F1115",
+    backgroundColor: "#1C1C1E",
     borderRadius: 10,
     overflow: "hidden",
     maxHeight: 220,

@@ -72,9 +72,16 @@ const styles = StyleSheet.create({
   },
   rowName: { color: "#ECEDEE", fontSize: 16, fontWeight: "500" },
   rowNums: { color: "#8A8F98", fontSize: 14, fontVariant: ["tabular-nums"] },
-  divider: {
-    height: StyleSheet.hairlineWidth,
-    backgroundColor: "#22262E",
+   divider: {
+    // 1dp, not StyleSheet.hairlineWidth. A hairline is 0.36dp on a Pixel 8,
+    // and at this colour against the surface behind it the line is drawn
+    // and not seen — the same pair that was already found invisible on the
+    // period menu, which is where this 1dp #636366 comes from.
+    height: 1,
+    backgroundColor: "#636366",
+    // Matches the row's own paddingHorizontal, so the line starts where the
+    // text starts rather than at the box's edge.
     marginHorizontal: 20,
   },
+  
 });

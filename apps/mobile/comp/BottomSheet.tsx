@@ -96,8 +96,15 @@ export default function BottomSheet({ visible, title, onClose, children }: Props
 const styles = StyleSheet.create({
   // justifyContent pins the panel to the bottom of the window.
   backdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.6)", justifyContent: "flex-end" },
-  sheet: {
-    backgroundColor: "#171B22",
+    sheet: {
+    // Black, so the fields can be #1C1C1E — the same page-and-card pair the
+    // list screens use. Against the old #171B22 that card colour reads at
+    // 1.01, which is no edge at all.
+    backgroundColor: "#000000",
+    // The backdrop over the black page is also black, so this surface has no
+    // edge of its own where it crosses empty page. This line is the edge.
+    borderTopWidth: 1,
+    borderTopColor: "#2C2C2E",
     borderTopLeftRadius: 16,
     borderTopRightRadius: 16,
     paddingTop: 16,
