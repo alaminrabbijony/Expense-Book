@@ -209,9 +209,13 @@ export const MIGRATIONS: string[] = [
   //   could use, read the table straight through in file order, and fetched
   //   nothing extra. Sequential beat scattered.
   //
-  //   suggestCategory gains more than the title page does. It matches on
-  //   title too, it runs on every title blur in the add form, and it was
-  //   reading the whole table to do it.
+  //   suggestCategory was expected to gain more than the title page does. It
+  //   matches on title too and runs on every title blur. That expectation was
+  //   never measured on this device, and off the device the figure is
+  //   1.3-1.7x, not the 8x first predicted. The 8x came from a model of the
+  //   query that was missing its JOIN categories, which is most of its cost.
+  //   There is still no device before-number at a 5,000-row title, so what
+  //   this index does for that lookup is unknown.
   //
   //   amount_minor is deliberately NOT a fourth column here. It would let
   //   the totals be answered from the index without touching the table at
@@ -224,5 +228,55 @@ export const MIGRATIONS: string[] = [
   `
   CREATE INDEX IF NOT EXISTS idx_expenses_title_created_at_id
     ON expenses (title COLLATE NOCASE, created_at DESC, id DESC);
+  `,
+    // 7 -> 8  ·  An icon name on each category.
+  //
+  //   TEXT and nullable, with NO default. NULL means nobody has chosen an
+  //   icon for this category, and the card draws its placeholder for that. A
+  //   stored placeholder would collapse two different facts into one value:
+  //   "nobody chose" and "somebody chose the receipt" would be the same row,
+  //   and nothing could tell them apart afterwards.
+  //
+  //   No IF NOT EXISTS, and that is not a judgement call here. SQLite does
+  //   not parse IF NOT EXISTS on ADD COLUMN at all — it is a CREATE INDEX
+  //   clause only, which is why 2 -> 3 can use it and this cannot.
+  //
+  //   A non-NULL DEFAULT would be legal on this column, unlike category_id's
+  //   in 3 -> 4. That rule is about a REFERENCES clause, not about defaults,
+  //   and this column has none. It is not used anyway, for the reason above.
+  //
+  //   ADD COLUMN writes a column definition into the schema and rewrites no
+  //   rows. On a copy of this schema, adding a column to a 50,000-row table
+  //   took 0.9ms and left page_count unchanged, while copying those rows into
+  //   a new table took 42.7ms before a single index was rebuilt. So this is
+  //   not the table rebuild that would drop and recreate every index.
+  //
+  //   The UPDATEs are reference data, like the rows they fill in: a fresh
+  //   install should not open on a screen of identical placeholders.
+  //
+  //   Uncategorised is deliberately left NULL. It means "not sorted yet", and
+  //   giving it an icon of its own would make it look sorted.
+  //
+  //   Bills does NOT get receipt-outline, which is otherwise the obvious
+  //   glyph for it. That is the placeholder an iconless category draws, so
+  //   Bills and Uncategorised would look identical on screen and a chosen
+  //   icon could not be told from an unset one by eye.
+  //
+  //   No guard on the ids. A category that was deleted matches nothing, the
+  //   UPDATE moves zero rows, and that is the right outcome rather than an
+  //   error.
+  //
+  //   Every name below was checked against the installed Ionicons glyph map.
+  //   Once a name lives in the database the type checker cannot see it, and
+  //   an unknown name draws a literal "?" in the icon font without throwing.
+  `
+  ALTER TABLE categories ADD COLUMN icon_name TEXT;
+
+  UPDATE categories SET icon_name = 'fast-food-outline'     WHERE id = 'food';
+  UPDATE categories SET icon_name = 'bus-outline'           WHERE id = 'transport';
+  UPDATE categories SET icon_name = 'document-text-outline' WHERE id = 'bills';
+  UPDATE categories SET icon_name = 'home-outline'          WHERE id = 'rent';
+  UPDATE categories SET icon_name = 'medkit-outline'        WHERE id = 'health';
+  UPDATE categories SET icon_name = 'book-outline'          WHERE id = 'study';
   `,
 ];

@@ -25,8 +25,20 @@ export type Expense = {
   amountMinor: Minor;
   currencyCode: string;
   createdAt: number;
+  /*
+   * The category's id — not its name, not its icon. The list query can fetch
+   * this because it is a column on expenses itself, so no join is needed.
+   * Whatever draws the row turns the id into an icon from a thirteen-row map,
+   * which is why the same icon string is never fetched fifty times for one
+   * page.
+   *
+   * Nullable because the column is. An added column carrying REFERENCES
+   * cannot have a non-NULL default, so SQLite forced that. insertExpense
+   * always passes a value, so in practice it is never null — but the type has
+   * to match the column, not the habit.
+   */
+  categoryId: string | null;
 };
-
 /* What SQLite hands back: snake_case, exactly as the columns are declared. */
 type ExpenseRow = {
   id: string;
@@ -34,7 +46,9 @@ type ExpenseRow = {
   amount_minor: number;
   currency_code: string;
   created_at: number;
+  category_id: string | null;
 };
+
 
 const toExpense = (row: ExpenseRow): Expense => {
   return {
@@ -48,12 +62,22 @@ const toExpense = (row: ExpenseRow): Expense => {
     amountMinor: asMinor(row.amount_minor),
     currencyCode: row.currency_code,
     createdAt: row.created_at,
+    categoryId: row.category_id,
   };
 };
-
 export const PAGE_SIZE = 50;
 
-const LIST_PAGE_HEAD = `SELECT id, title, amount_minor, currency_code, created_at
+/*
+ * The opening of every list query. Five live queries are built from this one
+ * string, each by gluing a different WHERE onto it — so a column added here
+ * is added to all five at once, and every timing recorded against the old
+ * text stops describing the query it was taken on.
+ *
+ * category_id is selected rather than LEFT JOINed from categories. The column
+ * is on expenses itself, so the row already carries the key. A join would
+ * fetch the same icon string fifty times a page for thirteen distinct values.
+ */
+const LIST_PAGE_HEAD = `SELECT id, title, amount_minor, currency_code, created_at, category_id
        FROM expenses`;
 
 const LIST_PAGE_TAIL = `ORDER BY created_at DESC, id DESC`;
@@ -101,20 +125,29 @@ export const listExpensePage = (
    * Two calls rather than one array built conditionally. The parameter ORDER
    * differs between the branches, and that is exactly the kind of thing a
    * shared array gets quietly wrong.
+   *
+   * Through readInRange now, like the range reads. Before this, the query had
+   * no timing and no plan of its own: it called all() directly, so the only
+   * number for it was the list screen's "first page" line, which prints once
+   * when the screen mounts and never again.
+   *
+   * readInRange is declared further down this file, which is safe because
+   * nothing calls this while the module is still being evaluated — every
+   * caller is a screen, and screens run later.
    */
   const rows = categoryId
-    ? all<ExpenseRow>(`${LIST_PAGE_SELECT_FILTERED} LIMIT ? OFFSET ?`, [
-        categoryId,
-        PAGE_SIZE,
-        offset,
-      ])
-    : all<ExpenseRow>(`${LIST_PAGE_SELECT} LIMIT ? OFFSET ?`, [
-        PAGE_SIZE,
-        offset,
-      ]);
+    ? readInRange<ExpenseRow>(
+        "listExpensePage, filtered",
+        `${LIST_PAGE_SELECT_FILTERED} LIMIT ? OFFSET ?`,
+        [categoryId, PAGE_SIZE, offset],
+      )
+    : readInRange<ExpenseRow>(
+        "listExpensePage",
+        `${LIST_PAGE_SELECT} LIMIT ? OFFSET ?`,
+        [PAGE_SIZE, offset],
+      );
   return rows.map(toExpense);
 };
-
 /*
  * The only place an id is generated in this app.
  *
@@ -147,6 +180,10 @@ export const insertExpense = (
     currencyCode,
     amountMinor,
     createdAt: Date.now(),
+    /* The list query selects this now, so the object returned here has to
+     * carry it too. A caller that puts this row straight into a list would
+     * otherwise be holding a row the query itself would never produce. */
+    categoryId,
   };
 
   run(
@@ -189,6 +226,12 @@ export const insertExpense = (
  * COUNT and SUM are aggregates — SQLite squashes many rows into one value
  * internally, so no rows and no objects cross into JavaScript.
  *
+ * Through readInRange, so it finally has a timing and a plan. This query does
+ * NOT use LIST_PAGE_HEAD, so a change to the head cannot reach it. That makes
+ * it a useful control beside the page read on the same screen: if the page
+ * moves and this stays put, the head is the cause. If both move, the phone
+ * was busy.
+ *
  * @param categoryId Omit for every category. When given, the total MUST
  *   narrow with it: a list showing one category above a total showing
  *   everything is a screen that lies quietly.
@@ -196,16 +239,26 @@ export const insertExpense = (
 export const readTotals = (
   categoryId?: string,
 ): { count: number; totalMinor: Minor } => {
+  /* Reads COUNT(*) back out of the one result row, so the log line says how
+   * many expenses the total covers instead of just "1 row". A time means
+   * nothing without the number of rows it was taken over. */
+  const addedUp = (r: { n: number }[]) => r[0]?.n ?? 0;
+
   const rows = categoryId
-    ? all<{ n: number; total: number | null }>(
+    ? readInRange<{ n: number; total: number | null }>(
+        "readTotals, filtered",
         `SELECT COUNT(*) AS n, SUM(amount_minor) AS total
            FROM expenses
           WHERE category_id = ?`,
         [categoryId],
+        addedUp,
       )
-    : all<{ n: number; total: number | null }>(
+    : readInRange<{ n: number; total: number | null }>(
+        "readTotals",
         `SELECT COUNT(*) AS n, SUM(amount_minor) AS total
        FROM expenses`,
+        [],
+        addedUp,
       );
 
   /*
@@ -544,9 +597,13 @@ export const deleteCategory = (id: string): number => {
  * "Uncategorised" would look like the app decided something when it did not.
  * The exclusion runs BEFORE the grouping, so those rows never form a group.
  *
- * There is no index on `title`. At tens of thousands of rows this costs tens
- * of milliseconds and runs once per title blur, which was measured and
- * accepted. Add an index here if a title-based screen ever needs it.
+ * There IS an index on `title`: idx_expenses_title_created_at_id, declared
+ * COLLATE NOCASE so this query can use it. Declared without that collation it
+ * would sit unused and every plan would still say SCAN.
+ *
+ * What it does for THIS lookup has never been measured on the device. This
+ * function calls all() directly rather than readInRange, so it prints a
+ * timing and no plan. Off the device the gain was 1.3 to 1.7x.
  */
 export const suggestCategory = (title: string): Category | null => {
   const clean = title.trim();
@@ -636,10 +693,11 @@ export type ExpenseForEdit = {
  * One expense with everything an edit form needs, read fresh when the form
  * opens.
  *
- * This exists so the list page query never has to change. That query's text
- * is fixed — the recorded list timings describe it character for character,
- * and adding a column would make every one of those numbers describe
- * something else.
+ * This exists so the list page query does not have to carry a category NAME.
+ * The list fetches category_id, which is a column on expenses. The name lives
+ * on categories and would need a join on every page to reach it. An edit form
+ * opens one row at a time, so one lookup here is cheaper than a join across
+ * fifty rows a page.
  *
  * The price of reading here instead is one lookup by PRIMARY KEY, which
  * SQLite answers by going straight to the row. The dev log below reports what
@@ -762,17 +820,18 @@ export const updateExpense = (
 /* ─── Deleting one expense, and putting it back ────────────────────────── */
 
 /**
- * An expense as the list shows it, plus the one column the list query leaves
- * out: its category.
+ * What undo holds between a delete and a restore: the whole row.
  *
- * This is what undo holds between a delete and a restore. The list's own
- * Expense is not enough — LIST_PAGE_SELECT does not select category_id, so a
- * row rebuilt from it would come back with no category.
+ * This used to be Expense with a category bolted on, because the list query
+ * did not select category_id and a row rebuilt from it would have come back
+ * with no category. The list query selects it now, so Expense already IS the
+ * whole row, and this is a plain alias.
  *
- * categoryId allows null because the column does. Restore puts back exactly
- * what was there, a NULL included, rather than tidying it on the way.
+ * The name stays because it says what the value is for. Restore puts back
+ * exactly what was there, a null category included, rather than tidying it on
+ * the way.
  */
-export type DeletedExpense = Expense & { categoryId: string | null };
+export type DeletedExpense = Expense;
 
 /**
  * Delete one expense, and hand back everything needed to undo it.
@@ -799,8 +858,12 @@ export const deleteExpense = (id: string): DeletedExpense => {
    * No transaction around the pair. all() and run() are synchronous, so no
    * other code in the app can run between the read and the delete.
    * deleteCategory needs tx() because it makes two writes; this makes one.
+   *
+   * These columns match LIST_PAGE_HEAD's on purpose. Both produce an
+   * ExpenseRow, so the copy undo holds is the same shape the list holds. If
+   * the head ever gains another column, this list gains it too.
    */
-  const rows = all<ExpenseRow & { category_id: string | null }>(
+  const rows = all<ExpenseRow>(
     `SELECT id, title, amount_minor, currency_code, created_at, category_id
        FROM expenses
       WHERE id = ?`,
@@ -826,10 +889,10 @@ export const deleteExpense = (id: string): DeletedExpense => {
   }
 
   /* toExpense is the list's own read boundary, so a stored float throws here
-   * instead of travelling into the undo copy. */
-  return { ...toExpense(row), categoryId: row.category_id };
+   * instead of travelling into the undo copy. It carries categoryId now, so
+   * nothing has to be bolted on afterwards. */
+  return toExpense(row);
 };
-
 /**
  * Put a deleted expense back, exactly as it was.
  *
@@ -919,32 +982,31 @@ type BindParams = Parameters<typeof all>[1];
 const reported = new Set<string>();
 
 /**
- * Run a query and time it. In development, also report its first call
- * since the app started: how many rows came back, the milliseconds, and the
- * plan SQLite chose. The month's reads and the title page's reads both go
- * through here.
+ * Run a query and time it. In development it reports EVERY call: how many
+ * rows came back and the milliseconds. The plan SQLite chose is added to the
+ * first call since launch only.
  *
  * "Rows" counts what the query RETURNED. For a page, that is the page. For
  * a total, it is always 1: the single result row. So a total can pass
  * `addedUp`, which reads from that row how many expenses it added up, and
- * the line says that too: "1 row in 4ms, added up 37 expenses". A total
- * that does not pass it — the month's, today — still says only "1 row".
+ * the line says that too: "1 row in 4ms, added up 37 expenses".
  *
  * "SEARCH ... USING INDEX" in the plan means SQLite goes straight to the
  * rows it needs. "SCAN expenses" means it reads the whole table to find
  * them: for a month, every month would cost as much as all of history.
  *
- * The time covers the query alone. EXPLAIN QUERY PLAN runs from a
- * setTimeout, so it never adds to that time, or to the screen's own
- * "first page" time. `addedUp` runs after the time is taken, too.
+ * The plan is printed once per query per launch because EXPLAIN costs
+ * something and the plan does not change between identical calls. The
+ * TIMING prints every call, so four readings are four taps instead of four
+ * app starts — and three of those four are warm, which is what every
+ * recorded number in this project is.
+ *
+ * The time covers the query alone. Both the plan and `addedUp` run from a
+ * setTimeout, so neither can land inside anything being timed.
  *
  * setTimeout(0) waits only until the code running now has finished, not
  * until the screen is done. On launch, the plan lines print BEFORE the
- * screen's mount effects ("[home] copy 1 mounted"), so the EXPLAIN can
- * still land inside anything timed across several steps. It only plans the
- * query and never runs it.
- *
- * Once per query per launch, so the log stays readable. `r` resets it.
+ * screen's mount effects ("[home] copy 1 mounted").
  */
 const readInRange = <T>(
   label: string,
@@ -956,23 +1018,33 @@ const readInRange = <T>(
   const rows = all<T>(sql, params);
   const ms = Date.now() - t0;
 
-  if (__DEV__ && !reported.has(label)) {
-    reported.add(label);
+  if (__DEV__) {
     const n = rows.length;
+
+    /*
+     * Whether this is the first call is decided HERE, not inside the
+     * setTimeout below. Decided inside, several calls made in the same tick
+     * would all run after the Set had already been written, and the plan
+     * would never print at all. Modelled both ways: deciding inside gave
+     * four timing lines and zero plans.
+     */
+    const first = !reported.has(label);
+    if (first) reported.add(label);
+
     setTimeout(() => {
       /* A diagnostic must never be the thing that crashes the app. */
       try {
-        /* Empty for a query that does not pass addedUp, so its line reads
-         * exactly as before. */
         const size = addedUp ? `, added up ${addedUp(rows)} expenses` : "";
-        const plan = all<{ detail: string }>(
-          `EXPLAIN QUERY PLAN ${sql}`,
-          params,
-        );
+        const tail = first
+          ? `, first call since launch — plan: ${all<{ detail: string }>(
+              `EXPLAIN QUERY PLAN ${sql}`,
+              params,
+            )
+              .map((step) => step.detail)
+              .join(" | ")}`
+          : "";
         console.log(
-          `${label}: ${n} ${n === 1 ? "row" : "rows"} in ${ms}ms${size}, first call since launch — plan: ${plan
-            .map((step) => step.detail)
-            .join(" | ")}`,
+          `${label}: ${n} ${n === 1 ? "row" : "rows"} in ${ms}ms${size}${tail}`,
         );
       } catch (e) {
         console.log(`${label}: plan failed — ${String(e)}`);
@@ -1165,8 +1237,11 @@ export const yearRangeAt = (at: number): DateRange => {
  * JavaScript whether two titles are the same has to fold the same way
  * (sameTitle, in the list screen).
  *
- * KNOWN ISSUE: there is no index on title yet. Each report prints its plan,
- * so the cost can be measured before one is added.
+ * The index these use is idx_expenses_title_created_at_id, on
+ * (title COLLATE NOCASE, created_at DESC, id DESC). The collation is
+ * load-bearing: declared without it the index would sit unused and both plans
+ * would still say SCAN. On the device both read
+ * SEARCH expenses USING INDEX idx_expenses_title_created_at_id.
  */
 const LIST_PAGE_SELECT_TITLE = `${LIST_PAGE_HEAD}
       WHERE title = ? COLLATE NOCASE
@@ -1277,4 +1352,29 @@ export const readExpenseTitle = (id: string): string | null => {
     [id],
   );
   return rows[0]?.title ?? null;
+};
+
+/* A category id mapped to its icon name. Nothing else — a list row needs the
+ * picture, not the name or the money. */
+export type CategoryIcons = Record<string, string>;
+
+/**
+ * Every category that HAS an icon, as { id: iconName }.
+ *
+ * `WHERE icon_name IS NOT NULL` so a category without one simply is not in
+ * the map. That gives one rule instead of two: a lookup that finds nothing
+ * falls back to the placeholder, and "no row" and "null icon" cannot drift
+ * apart.
+ *
+ * Thirteen rows. This is the read that replaces a LEFT JOIN on every list
+ * page — a join would fetch the same icon string fifty times a page for the
+ * same thirteen values.
+ */
+export const readCategoryIcons = (): CategoryIcons => {
+  const rows = all<{ id: string; icon_name: string }>(
+    `SELECT id, icon_name FROM categories WHERE icon_name IS NOT NULL`,
+  );
+  const map: CategoryIcons = {};
+  for (const r of rows) map[r.id] = r.icon_name;
+  return map;
 };

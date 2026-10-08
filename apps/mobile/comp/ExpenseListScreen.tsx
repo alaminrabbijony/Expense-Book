@@ -10,6 +10,7 @@ import {
   listTitlePage,
   monthRangeAt,
   readCategories,
+  readCategoryIcons,
   readExpenseForEdit,
   readTitleTotals,
   readTotals,
@@ -19,6 +20,7 @@ import {
   yearRangeAt,
 } from "@/db/expenses";
 import type {
+  CategoryIcons,
   DateRange,
   DeletedExpense,
   Expense,
@@ -351,14 +353,112 @@ function titleEmptyText(
 }
 
 /*
- * The icon on every expense card.
- *
- * KNOWN ISSUE: this is the same icon on every row. It is the slot a
- * per-category icon will fill. That needs an icon column on categories AND
- * the category on each list row — and the list query does not select it, so
- * it is a change to LIST_PAGE_SELECT, not to this file.
+ * The icon a card falls back to: a category with no icon chosen, and the
+ * Uncategorised row, which is meant to look unsorted.
  */
 const DEFAULT_CATEGORY_ICON = "receipt-outline" as const;
+
+/*
+ * The icon font's own list of names, read once at module load.
+ *
+ * An icon name used to be written in this file, so a typo was a type error.
+ * It comes out of the database now, as plain text, and TypeScript cannot see
+ * inside a database. An unknown name does not throw either: the font draws a
+ * literal "?" on the card and logs nothing.
+ *
+ * getRawGlyphMap is the typed way to ask the font what it has. The font also
+ * has a hasIcon() function, but it is missing from the published typings, so
+ * it does not compile.
+ */
+const IONICON_NAMES = Ionicons.getRawGlyphMap();
+type IoniconName = keyof typeof IONICON_NAMES;
+
+const iconOrDefault = (name: string | undefined): IoniconName =>
+  name && Object.prototype.hasOwnProperty.call(IONICON_NAMES, name)
+    ? (name as IoniconName)
+    : DEFAULT_CATEGORY_ICON;
+
+/*
+ * A one-line signature of the icon map. It does two jobs: deciding whether a
+ * re-read actually changed anything, and telling the list that it did.
+ *
+ * Both come from the same object, so they cannot disagree — the same shape as
+ * holdPeriod writing its four values together. Sorted, so the order rows come
+ * back in cannot change the signature by itself.
+ */
+const iconsSignature = (icons: CategoryIcons): string =>
+  Object.keys(icons)
+    .sort()
+    .map((id) => `${id}:${icons[id]}`)
+    .join(",");
+
+/*
+ * Twelve colours for the category icons.
+ *
+ * `color` is the glyph. `tint` is the circle behind it: the same colour at 22%
+ * over the card's #1C1C1E, worked out in advance so no blending happens while
+ * a row draws.
+ *
+ * Every pair was checked against the surface it sits on and the weakest reads
+ * 3.54. iOS's indigo #5E5CE6 is NOT in here: it read 2.75, under the 3.0 floor
+ * for a glyph this size, and #7D7AFF replaces it at 4.05.
+ */
+const ICON_COLORS: { color: string; tint: string }[] = [
+  { color: "#FF453A", tint: "#4E2524" },
+  { color: "#FF9F0A", tint: "#4E391A" },
+  { color: "#FFD60A", tint: "#4E451A" },
+  { color: "#30D158", tint: "#20442B" },
+  { color: "#66D4CF", tint: "#2C4445" },
+  { color: "#40C8E0", tint: "#244249" },
+  { color: "#64D2FF", tint: "#2C4450" },
+  { color: "#0A84FF", tint: "#183350" },
+  { color: "#7D7AFF", tint: "#313150" },
+  { color: "#BF5AF2", tint: "#402A4D" },
+  { color: "#FF375F", tint: "#4E222C" },
+  { color: "#AC8E68", tint: "#3C352E" },
+];
+
+/*
+ * What a category with no icon shows: the grey circle and near-white glyph the
+ * cards had before any of this. Kept separate on purpose. "Nobody has chosen
+ * an icon yet" should not look like a choice someone made.
+ */
+const PLACEHOLDER_SHADE = { color: "#ECEDEE", tint: "#2C2C2E" };
+
+/*
+ * Which colour a category gets.
+ *
+ * Worked out from its id rather than stored, so nothing needs a column or a
+ * migration and every category has one from the moment it exists, hand-made
+ * ones included. The same id always lands on the same colour, so a colour
+ * never moves by itself. The five categories that have icons today land on
+ * five different colours.
+ *
+ * Once a picker exists to choose a colour, a stored one simply overrides this.
+ */
+const shadeForCategory = (id: string): { color: string; tint: string } => {
+  let h = 0;
+  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) | 0;
+  return ICON_COLORS[Math.abs(h) % ICON_COLORS.length];
+};
+
+/*
+ * Everything one card needs to draw its icon: the glyph name, its colour, and
+ * the circle behind it.
+ *
+ * The colour follows whether an icon was SET, not whether the font knew the
+ * name. A category whose icon the font cannot draw still gets its colour; a
+ * category with no icon at all stays grey.
+ */
+const iconForRow = (
+  categoryId: string | null,
+  icons: CategoryIcons,
+): { name: IoniconName; color: string; tint: string } => {
+  const chosen = categoryId ? icons[categoryId] : undefined;
+  const shade =
+    chosen && categoryId ? shadeForCategory(categoryId) : PLACEHOLDER_SHADE;
+  return { name: iconOrDefault(chosen), color: shade.color, tint: shade.tint };
+};
 
 /*
  * When the current row animation started, for the dev logs below. null when
@@ -637,6 +737,9 @@ const iosPressed = (pressed: boolean) =>
  */
 const ExpenseRow = memo(function ExpenseRow({
   expense,
+  iconName,
+  iconColor,
+  iconTint,
   leaving,
   restoring,
   todayStart,
@@ -647,6 +750,15 @@ const ExpenseRow = memo(function ExpenseRow({
   onOpen,
 }: {
   expense: Expense;
+  /* Already checked against the font by the caller, so this component never
+   * has to think about a name the font does not have. A plain string, like
+   * todayStart and clock24, so memo can compare it with Object.is. */
+  iconName: IoniconName;
+  /* Two plain strings rather than one object. memo compares with Object.is, so
+   * an object built in the parent would be a new value on every render and the
+   * row would never skip one. */
+  iconColor: string;
+  iconTint: string;
   leaving: boolean;
   restoring: boolean;
   todayStart: number;
@@ -684,8 +796,8 @@ const ExpenseRow = memo(function ExpenseRow({
    * plain View below, depending on whether a tap does anything. */
   const cardBody = (
     <>
-      <View style={styles.iconCircle}>
-        <Ionicons name={DEFAULT_CATEGORY_ICON} size={20} color="#ECEDEE" />
+      <View style={[styles.iconCircle, { backgroundColor: iconTint }]}>
+        <Ionicons name={iconName} size={20} color={iconColor} />
       </View>
       <View style={styles.cardText}>
         <Text style={styles.rowTitle} numberOfLines={1}>
@@ -1037,6 +1149,27 @@ export default function ExpenseListScreen({
 
   const [period, setPeriod] = useState<Period | null>(() => periodRef.current);
   const [range, setRange] = useState<DateRange | null>(() => rangeRef.current);
+
+  /*
+   * The category icons, held as the map and its signature together.
+   *
+   * Read in the initialiser as well as on focus, because an effect runs after
+   * the first render — without this, the first frame of a cold start would
+   * draw the placeholder on every card and then redraw all of them.
+   *
+   * On focus is enough to keep it true. A category can change four ways and
+   * each one is covered: an icon is only picked on the Categories tab, so this
+   * screen was blurred; a category made from the add sheet has no icon yet,
+   * and a map that does not know it falls back to the placeholder anyway; a
+   * rename does not touch icons; and a delete moves its expenses to
+   * Uncategorised, so those rows arrive carrying a different id.
+   */
+  const [icons, setIcons] = useState<{ map: CategoryIcons; key: string }>(
+    () => {
+      const map = readCategoryIcons();
+      return { map, key: iconsSignature(map) };
+    },
+  );
 
   /* useCallback for the same reason as holdCopy: the period check lists it,
    * and it only touches refs and setters, so it never changes. */
@@ -1594,6 +1727,20 @@ export default function ExpenseListScreen({
    */
   useFocusEffect(
     useCallback(() => {
+      /*
+       * Above the early return below, so it runs on every focus rather than
+       * only when the filter is still valid.
+       *
+       * The same object is kept when nothing changed. A fresh map every time
+       * would be a new value, which changes extraData, which redraws every row
+       * on screen for nothing.
+       */
+      const nextIcons = readCategoryIcons();
+      const nextKey = iconsSignature(nextIcons);
+      setIcons((prev) =>
+        prev.key === nextKey ? prev : { map: nextIcons, key: nextKey },
+      );
+
       if (filter && !readCategories().some((c) => c.id === filter.id)) {
         if (__DEV__) {
           console.log(
@@ -1853,6 +2000,16 @@ export default function ExpenseListScreen({
   ) => {
     updateExpense(target.id, title, amountMinor, currency, categoryId);
 
+    if (__DEV__) {
+      /* The card's icon comes from categoryId, so a card that looks unchanged
+       * after an edit has two possible causes: the category never changed, or
+       * it changed and the row in state did not follow. One line tells them
+       * apart instead of a second run. */
+      console.log(
+        `[${screen}] edit saved: category ${target.category?.id ?? "none"} -> ${categoryId}`,
+      );
+    }
+
     /* This copy patches itself below, so the new version is already shown.
      * Marked seen now, inside the handler, so the listener finds nothing to
      * do when it is told after the handler returns. */
@@ -1884,7 +2041,12 @@ export default function ExpenseListScreen({
       setRows((prev) =>
         prev.map((r) =>
           r.id === target.id
-            ? { ...r, title, amountMinor, currencyCode: currency }
+            ? /* categoryId is in this patch because the list row carries it
+               * now. Left out, the row would keep the OLD category after you
+               * move an expense to a new one, and the card would show the old
+               * icon until something re-read the list. Nothing throws, and the
+               * typecheck cannot see it: the spread carries the stale value. */
+              { ...r, title, amountMinor, currencyCode: currency, categoryId }
             : r,
         ),
       );
@@ -2012,9 +2174,9 @@ export default function ExpenseListScreen({
 
     /*
      * Rebuilt field by field so the list holds exactly what the list query
-     * would have returned. A categoryId left on the object would ride along
-     * through saveEdit's spread and go stale the first time the row's
-     * category is edited.
+     * would have returned — and that now includes categoryId, because the
+     * list query selects it. Taking it from the copy is what puts the row back
+     * carrying its own icon instead of the placeholder.
      */
     const row: Expense = {
       id: copy.id,
@@ -2022,6 +2184,7 @@ export default function ExpenseListScreen({
       amountMinor: copy.amountMinor,
       currencyCode: copy.currencyCode,
       createdAt: copy.createdAt,
+      categoryId: copy.categoryId,
     };
 
     /* Unlike exiting, one render is enough here. The row mounts in this
@@ -2303,7 +2466,7 @@ export default function ExpenseListScreen({
              * the renderItem call and Reanimated's animated wrapper around the
              * cell still run. The list Profiler measures what is left.
              */
-            extraData={`${leavingId}|${restoredId}|${todayStart}|${clock24}`}
+            extraData={`${leavingId}|${restoredId}|${todayStart}|${clock24}|${icons.key}`}
             /*
              * Different empty screens. An empty app needs "add one"; an
              * empty filter needs the way back out, so only it gets Show all.
@@ -2361,19 +2524,25 @@ export default function ExpenseListScreen({
                 </Text>
               ) : null
             }
-            renderItem={({ item: e }) => (
-              <ExpenseRow
-                expense={e}
-                leaving={e.id === leavingId}
-                todayStart={todayStart}
-                clock24={clock24}
-                restoring={e.id === restoredId}
-                onEdit={openEdit}
-                onDelete={deleteRow}
-                onWillOpen={closePreviousRow}
-                onOpen={titleOnly === undefined ? openTitle : null}
-              />
-            )}
+            renderItem={({ item: e }) => {
+              const icon = iconForRow(e.categoryId, icons.map);
+              return (
+                <ExpenseRow
+                  expense={e}
+                  iconName={icon.name}
+                  iconColor={icon.color}
+                  iconTint={icon.tint}
+                  leaving={e.id === leavingId}
+                  todayStart={todayStart}
+                  clock24={clock24}
+                  restoring={e.id === restoredId}
+                  onEdit={openEdit}
+                  onDelete={deleteRow}
+                  onWillOpen={closePreviousRow}
+                  onOpen={titleOnly === undefined ? openTitle : null}
+                />
+              );
+            }}
           />
         </Profiler>
       </Animated.View>
@@ -2805,7 +2974,9 @@ const styles = StyleSheet.create({
     width: 40,
     height: 40,
     borderRadius: 20,
-    backgroundColor: "#2C2C2E",
+    // No backgroundColor here. Every row supplies its own, from its category's
+    // colour or from the grey placeholder, so one declared here would never
+    // apply.
     alignItems: "center",
     justifyContent: "center",
   },

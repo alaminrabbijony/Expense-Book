@@ -44,17 +44,45 @@ db.execSync('PRAGMA journal_mode = WAL;');
 // with no way to audit it afterwards short of a full foreign_key_check sweep.
 db.execSync('PRAGMA foreign_keys = ON;'); 
 
-
+// Brings the database up to date, one transaction per step.
+//
+// The log lines are dev-only and they stay. Without them, a migration that
+// ran and a migration that was skipped look exactly the same from outside:
+// nothing on screen changes and nothing is printed.
+//
+// Each line prints AFTER withTransactionSync returns, never inside it.
+// Inside, a step that threw would have announced itself before the rollback
+// undid it. Same rule as the change counters: announce after it succeeded.
+//
+// The last line reads user_version back OUT of the file instead of trusting
+// the number this loop just wrote. That is what makes it evidence rather
+// than a claim — it reports what is in the database, not what the code
+// meant to put there.
 function migrate() {
   const row = db.getFirstSync<{ user_version: number }>('PRAGMA user_version');
   const current = row?.user_version ?? 0;
-  if (current >= MIGRATIONS.length) return;
+
+  if (current >= MIGRATIONS.length) {
+    if (__DEV__) {
+      console.log(`migrate: user_version ${current}, nothing to run`);
+    }
+    return;
+  }
 
   for (let v = current; v < MIGRATIONS.length; v++) {
+    const t0 = Date.now();
     db.withTransactionSync(() => {
       db.execSync(MIGRATIONS[v]);
       db.execSync(`PRAGMA user_version = ${v + 1};`);
     });
+    if (__DEV__) {
+      console.log(`migrate: ${v} -> ${v + 1} in ${Date.now() - t0}ms`);
+    }
+  }
+
+  if (__DEV__) {
+    const after = db.getFirstSync<{ user_version: number }>('PRAGMA user_version');
+    console.log(`migrate: user_version is now ${after?.user_version ?? 0}`);
   }
 }
 
