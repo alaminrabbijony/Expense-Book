@@ -200,7 +200,7 @@ export default function TabsLayout() {
         <Tabs.Screen name="(home)" options={HOME_OPTIONS} />
         <Tabs.Screen name="(all)" options={ALL_OPTIONS} />
         <Tabs.Screen name="add" options={ADD_OPTIONS} />
-        <Tabs.Screen name="categories" options={CATEGORIES_OPTIONS} />
+        <Tabs.Screen name="(categories)" options={CATEGORIES_OPTIONS} />
         <Tabs.Screen name="settings" options={SETTINGS_OPTIONS} />
       </Tabs>
 

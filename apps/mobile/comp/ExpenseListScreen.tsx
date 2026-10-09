@@ -1,8 +1,17 @@
 import BottomSheet from "@/comp/BottomSheet";
 import CategorySheet, { type CategoryChoice } from "@/comp/CategorySheet";
 import ExpenseForm from "@/comp/ExpenseForm";
+import IconPicker from "@/comp/IconPicker";
+import {
+  iconFor,
+  iconForRow,
+  iconsSignature,
+  PLACEHOLDER_SHADE,
+  shadeForCategory,
+  type IoniconName,
+} from "@/comp/categoryIcon";
 import { onAddSheetRequested, requestAddSheet } from "@/comp/addSheet";
-import { expenseVersion, onExpensesChanged } from "@/db/changes";
+import { expenseVersion, onCategoriesChanged, onExpensesChanged } from "@/db/changes";
 import {
   deleteExpense,
   listExpensePage,
@@ -10,16 +19,21 @@ import {
   listTitlePage,
   monthRangeAt,
   readCategories,
+  readCategoryDetail,
   readCategoryIcons,
   readExpenseForEdit,
   readTitleTotals,
   readTotals,
   readTotalsInRange,
+  renameCategory,
   restoreExpense,
+  setCategoryIcon,
+  UNCATEGORISED_ID,
   updateExpense,
   yearRangeAt,
 } from "@/db/expenses";
 import type {
+  CategoryDetail,
   CategoryIcons,
   DateRange,
   DeletedExpense,
@@ -50,6 +64,7 @@ import {
   timeCategoryReads,
   timeFilteredPages,
   timePages,
+  holdPeriod
 } from "@/db/devTools";
 */
 import { asMinor, DEFAULT_CURRENCY, formatMoney, type Minor } from "@et/shared";
@@ -72,6 +87,7 @@ import {
   StatusBar,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from "react-native";
 import ReanimatedSwipeable, {
@@ -353,112 +369,38 @@ function titleEmptyText(
 }
 
 /*
- * The icon a card falls back to: a category with no icon chosen, and the
- * Uncategorised row, which is meant to look unsorted.
+ * What the category page's empty list says. The same three shapes as
+ * titleEmptyText, and an empty month or year gets Show all time beside it.
+ *
+ * All time is different from the title page's. A title with no rows left was
+ * renamed or deleted away; a category with none had its expenses MOVED, which
+ * is what deleting another category does to them. YOURS TO REWORD.
+ *
+ *   this month   No Food expenses this month / Nothing yet this month.
+ *   this year    No Food expenses this year / Nothing yet this year.
+ *   all time     Nothing in Food / Every expense here was moved or deleted.
  */
-const DEFAULT_CATEGORY_ICON = "receipt-outline" as const;
-
-/*
- * The icon font's own list of names, read once at module load.
- *
- * An icon name used to be written in this file, so a typo was a type error.
- * It comes out of the database now, as plain text, and TypeScript cannot see
- * inside a database. An unknown name does not throw either: the font draws a
- * literal "?" on the card and logs nothing.
- *
- * getRawGlyphMap is the typed way to ask the font what it has. The font also
- * has a hasIcon() function, but it is missing from the published typings, so
- * it does not compile.
- */
-const IONICON_NAMES = Ionicons.getRawGlyphMap();
-type IoniconName = keyof typeof IONICON_NAMES;
-
-const iconOrDefault = (name: string | undefined): IoniconName =>
-  name && Object.prototype.hasOwnProperty.call(IONICON_NAMES, name)
-    ? (name as IoniconName)
-    : DEFAULT_CATEGORY_ICON;
-
-/*
- * A one-line signature of the icon map. It does two jobs: deciding whether a
- * re-read actually changed anything, and telling the list that it did.
- *
- * Both come from the same object, so they cannot disagree — the same shape as
- * holdPeriod writing its four values together. Sorted, so the order rows come
- * back in cannot change the signature by itself.
- */
-const iconsSignature = (icons: CategoryIcons): string =>
-  Object.keys(icons)
-    .sort()
-    .map((id) => `${id}:${icons[id]}`)
-    .join(",");
-
-/*
- * Twelve colours for the category icons.
- *
- * `color` is the glyph. `tint` is the circle behind it: the same colour at 22%
- * over the card's #1C1C1E, worked out in advance so no blending happens while
- * a row draws.
- *
- * Every pair was checked against the surface it sits on and the weakest reads
- * 3.54. iOS's indigo #5E5CE6 is NOT in here: it read 2.75, under the 3.0 floor
- * for a glyph this size, and #7D7AFF replaces it at 4.05.
- */
-const ICON_COLORS: { color: string; tint: string }[] = [
-  { color: "#FF453A", tint: "#4E2524" },
-  { color: "#FF9F0A", tint: "#4E391A" },
-  { color: "#FFD60A", tint: "#4E451A" },
-  { color: "#30D158", tint: "#20442B" },
-  { color: "#66D4CF", tint: "#2C4445" },
-  { color: "#40C8E0", tint: "#244249" },
-  { color: "#64D2FF", tint: "#2C4450" },
-  { color: "#0A84FF", tint: "#183350" },
-  { color: "#7D7AFF", tint: "#313150" },
-  { color: "#BF5AF2", tint: "#402A4D" },
-  { color: "#FF375F", tint: "#4E222C" },
-  { color: "#AC8E68", tint: "#3C352E" },
-];
-
-/*
- * What a category with no icon shows: the grey circle and near-white glyph the
- * cards had before any of this. Kept separate on purpose. "Nobody has chosen
- * an icon yet" should not look like a choice someone made.
- */
-const PLACEHOLDER_SHADE = { color: "#ECEDEE", tint: "#2C2C2E" };
-
-/*
- * Which colour a category gets.
- *
- * Worked out from its id rather than stored, so nothing needs a column or a
- * migration and every category has one from the moment it exists, hand-made
- * ones included. The same id always lands on the same colour, so a colour
- * never moves by itself. The five categories that have icons today land on
- * five different colours.
- *
- * Once a picker exists to choose a colour, a stored one simply overrides this.
- */
-const shadeForCategory = (id: string): { color: string; tint: string } => {
-  let h = 0;
-  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) | 0;
-  return ICON_COLORS[Math.abs(h) % ICON_COLORS.length];
-};
-
-/*
- * Everything one card needs to draw its icon: the glyph name, its colour, and
- * the circle behind it.
- *
- * The colour follows whether an icon was SET, not whether the font knew the
- * name. A category whose icon the font cannot draw still gets its colour; a
- * category with no icon at all stays grey.
- */
-const iconForRow = (
-  categoryId: string | null,
-  icons: CategoryIcons,
-): { name: IoniconName; color: string; tint: string } => {
-  const chosen = categoryId ? icons[categoryId] : undefined;
-  const shade =
-    chosen && categoryId ? shadeForCategory(categoryId) : PLACEHOLDER_SHADE;
-  return { name: iconOrDefault(chosen), color: shade.color, tint: shade.tint };
-};
+function categoryEmptyText(
+  name: string,
+  period: Period | null,
+): { title: string; body: string } {
+  if (period === "month") {
+    return {
+      title: `No ${name} expenses this month`,
+      body: "Nothing yet this month.",
+    };
+  }
+  if (period === "year") {
+    return {
+      title: `No ${name} expenses this year`,
+      body: "Nothing yet this year.",
+    };
+  }
+  return {
+    title: `Nothing in ${name}`,
+    body: "Every expense here was moved or deleted.",
+  };
+}
 
 /*
  * When the current row animation started, for the dev logs below. null when
@@ -477,7 +419,7 @@ let rowAnimStartedAt: number | null = null;
  * a time anywhere in the app, so one name is enough. deleteRow and
  * undoDelete set it next to rowAnimStartedAt.
  */
-type ScreenName = "home" | "all" | "title";
+type ScreenName = "home" | "all" | "title" | "category";
 let rowAnimScreen: ScreenName = "home";
 
 /*
@@ -494,7 +436,12 @@ let rowAnimScreen: ScreenName = "home";
  *                 number, because a hot update keeps state and only re-runs
  *                 the effects
  */
-const copiesBuilt: Record<ScreenName, number> = { home: 0, all: 0, title: 0 };
+const copiesBuilt: Record<ScreenName, number> = {
+  home: 0,
+  all: 0,
+  title: 0,
+  category: 0,
+};
 
 /*
  * Dev log: how long after the tap one step of a row animation happened.
@@ -1005,23 +952,46 @@ function readHeaderTotals(
  * `showTopCard` draws the card. Without it there is no total, no ⋯ and no
  * filter, so `filter` stays null on All expenses.
  *
- * `monthOnly` and `titleOnly` are the differences in what is read. Home
- * passes monthOnly: its list, its total and its ⋯ sheet cover this month.
- * The title page passes titleOnly, the title it shows: its list and total
- * cover that title, in the period its ⋯ menu picks, this month to start.
+ * `monthOnly`, `titleOnly` and `categoryOnly` are the differences in what is
+ * read. Home passes monthOnly: its list, its total and its ⋯ sheet cover this
+ * month. The title page passes titleOnly, the title it shows. The category
+ * page passes categoryOnly, the category's ID — not its name, because a name
+ * can be renamed on that very page while an id cannot. Each narrows the list
+ * and the total, in the period its ⋯ menu picks, this month to start.
  * A prop never changes for a copy, so every function below can read them.
+ *
+ * WHY categoryOnly IS NOT JUST `filter`. `filter` is Home's ⋯ pick, and FOUR
+ * places clear it with applyFilter(null): the change listener, the period
+ * check on the 1st, the focus check when the filtered category is deleted,
+ * and the empty list's Show all. Any one of them would silently widen this
+ * page to every expense in the app. A prop cannot be cleared.
  */
 export default function ExpenseListScreen({
   screen,
   showTopCard,
   monthOnly = false,
   titleOnly,
+  categoryOnly,
 }: {
   screen: ScreenName;
   showTopCard: boolean;
   monthOnly?: boolean;
   titleOnly?: string;
+  categoryOnly?: string;
 }) {
+  /*
+   * The two pages that scope the whole screen to one thing, as plain
+   * booleans, because the tests below read better than `!== undefined` does
+   * and there are a dozen of them.
+   *
+   * hasPeriodMenu is the one that decides behaviour: a page scoped to one
+   * thing shows This month / This year / All time on its ⋯, and a page that
+   * is not shows Home's category filter instead. Both are props, so neither
+   * changes for the life of a copy.
+   */
+  const isTitle = titleOnly !== undefined;
+  const isCategory = categoryOnly !== undefined;
+  const hasPeriodMenu = isTitle || isCategory;
   /*
    * This copy's number, for the dev log above.
    *
@@ -1115,10 +1085,10 @@ export default function ExpenseListScreen({
   const [rows, setRows] = useState<Expense[]>(() => {
     /* Worked out in the same step as the page it scopes, so the two can
      * never name different stretches of time. */
-    periodRef.current = monthOnly || titleOnly !== undefined ? "month" : null;
+    periodRef.current = monthOnly || hasPeriodMenu ? "month" : null;
     rangeRef.current = rangeOf(periodRef.current, Date.now());
     const t0 = Date.now();
-    const first = readPage(rangeRef.current, 0, undefined, titleOnly);
+    const first = readPage(rangeRef.current, 0, categoryOnly, titleOnly);
     console.log(
       `[${screen}] first page: ${first.length} rows in ${Date.now() - t0}ms`,
     );
@@ -1133,7 +1103,7 @@ export default function ExpenseListScreen({
    * initialisers in the order they are written. */
   const [totals, setTotals] = useState(() => {
     const t0 = Date.now();
-    const first = readHeaderTotals(rangeRef.current, undefined, titleOnly);
+    const first = readHeaderTotals(rangeRef.current, categoryOnly, titleOnly);
     /*
      * Printed on every open, like "first page": opening a page four times
      * gives four readings. The size is in the line because a time means
@@ -1170,6 +1140,110 @@ export default function ExpenseListScreen({
       return { map, key: iconsSignature(map) };
     },
   );
+
+  /*
+   * Re-reads the icon map, keeping the SAME object when nothing changed.
+   *
+   * The comparison is the whole point. icons.key is in extraData, so a new
+   * object here tells the list every row might look different and all fifty
+   * render again. A rename bumps the counter this is called from and touches
+   * no icon at all.
+   *
+   * `screen` is its only dependency, and a copy's name never changes, so this
+   * function never changes either. That is what makes it safe to call from
+   * the listener below, which is made once at the first render and keeps
+   * whatever functions that render held.
+   */
+  const refreshIcons = useCallback(
+    (reason: string) => {
+      const next = readCategoryIcons();
+      const key = iconsSignature(next);
+      if (__DEV__) {
+        console.log(
+          `[${screen}] icons (${reason}): ` +
+            `${Object.keys(next).length} categories have one`,
+        );
+      }
+      setIcons((prev) => (prev.key === key ? prev : { map: next, key }));
+    },
+    [screen],
+  );
+
+
+  /*
+   * The category this page is showing — its name and its icon — or null on
+   * every other screen.
+   *
+   * The ROUTE reads it once to decide whether the page can open at all. This
+   * is the screen's own live copy, because the name and the icon are both
+   * about to become editable on this very page, and the card has to redraw
+   * the moment either is written.
+   *
+   * Read in the initialiser, not only on focus, for the same reason the icon
+   * map is: an effect runs after the first render, so the card would draw
+   * with no name and then redraw.
+   */
+  const [categoryDetail, setCategoryDetail] = useState<CategoryDetail | null>(
+    () => (categoryOnly === undefined ? null : readCategoryDetail(categoryOnly)),
+  );
+
+  /*
+   * Re-reads that category, beside refreshIcons and in the same two places.
+   *
+   * A null result means the category was deleted from somewhere else. The
+   * LAST KNOWN NAME IS KEPT rather than blanked: deleting a category moves
+   * its expenses to Uncategorised, so the expense counter bumps too and the
+   * list empties by itself. A card headed by a name over an empty list says
+   * what happened; a card headed by nothing does not.
+   *
+   * Does nothing at all on Home, All and the title page — categoryOnly is
+   * undefined there, and this returns before reading anything.
+   */
+  const refreshCategory = useCallback(
+    (reason: string) => {
+      if (categoryOnly === undefined) return;
+      const next = readCategoryDetail(categoryOnly);
+      if (__DEV__) {
+        console.log(
+          `[${screen}] category (${reason}): ` +
+            (next ? `${next.name}, icon ${next.iconName ?? "none"}` : "GONE"),
+        );
+      }
+      if (next) setCategoryDetail(next);
+    },
+    [categoryOnly, screen],
+  );
+
+  /*
+   * The rename being typed on the card, or null when the card is not in edit
+   * mode. null, not "", because an empty string is a thing somebody typed and
+   * has to be tellable from not editing at all.
+   *
+   * Category page only. Nothing else on this screen sets it.
+   */
+  const [nameDraft, setNameDraft] = useState<string | null>(null);
+
+  /*
+   * Where renameCategory's throw lands. Its messages were written to be read
+   * by a person: "Category name cannot be empty." and 'A category called
+   * "Food" already exists.' The same shape the Categories screen uses under
+   * its pill.
+   */
+  const [nameError, setNameError] = useState<string | null>(null);
+
+  /*
+   * The icon picked in the sheet but not yet saved, or null for "no icon".
+   *
+   * Seeded from the row when edit mode opens, so it always means something
+   * while editing and nothing has to tell "untouched" from "cleared". null is
+   * a real choice here — it is how an icon is taken away again.
+   */
+  const [iconDraft, setIconDraft] = useState<string | null>(null);
+
+  /* Whether the catalog sheet is open. */
+  const [pickerOpen, setPickerOpen] = useState(false);
+
+  const renaming = nameDraft !== null;
 
   /* useCallback for the same reason as holdCopy: the period check lists it,
    * and it only touches refs and setters, so it never changes. */
@@ -1442,6 +1516,79 @@ export default function ExpenseListScreen({
     [holdCopy, screen],
   );
 
+  /* ─── Renaming this category, on the card ────────────────────────────
+   *
+   * Category page only. The pencil on the card turns the name into a field;
+   * ✕ throws the typing away and ✓ writes it.
+   */
+
+  const startRename = () => {
+    /* The list is about to be covered by the dim layer, so the Undo row under
+     * the card would sit there unreachable. Every other control that covers
+     * the list ends the window too. */
+    endUndoWindow("rename");
+    /* The ⋯ disappears while editing, so a menu left open would have nothing
+     * to close it. */
+    setMenuAt(null);
+    setNameDraft(categoryDetail?.name ?? "");
+    setIconDraft(categoryDetail?.iconName ?? null);
+    setNameError(null);
+  };
+
+  const cancelRename = () => {
+    setNameDraft(null);
+    setIconDraft(null);
+    setPickerOpen(false);
+    setNameError(null);
+  };
+
+  const saveRename = () => {
+    if (categoryOnly === undefined || nameDraft === null) return;
+
+    /*
+     * Only what actually changed is written, and the NAME goes first.
+     *
+     * Each write bumps the categories counter, and this copy re-reads when it
+     * hears one — so writing a value back unchanged costs a read and a redraw
+     * for nothing.
+     *
+     * Name first because it is the one that can throw: a duplicate, or an
+     * empty string. Thrown there, nothing has been written at all. Two
+     * writes, not one transaction — the same shape as the add form making a
+     * category and then an expense.
+     *
+     * The comparison trims, because cleanCategoryName trims on the way in.
+     * Without that, saving "Adda " over "Adda" would write every time.
+     */
+    const savedName = categoryDetail?.name ?? "";
+    const savedIcon = categoryDetail?.iconName ?? null;
+
+    try {
+      if (nameDraft.trim() !== savedName) {
+        renameCategory(categoryOnly, nameDraft);
+      }
+      if (iconDraft !== savedIcon) {
+        setCategoryIcon(categoryOnly, iconDraft);
+      }
+      /*
+       * NOTHING sets the card's name here, on purpose.
+       *
+       * renameCategory bumps the categories counter, this copy hears its own
+       * write, and refreshCategory re-reads the row. So the name on the card
+       * is the name that was actually written — trimmed by cleanCategoryName
+       * on the way in, which typing it into state here would not be.
+       *
+       * This is the only screen in the app that writes a category while
+       * showing it, which is why that listener exists at all.
+       */
+      cancelRename();
+    } catch (err) {
+      /* Deliberately does NOT cancel. The field keeps what was typed so it
+       * can be corrected, exactly like the Categories screen's pill. */
+      setNameError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
   /*
    * Whether a finger has dragged the list since the last delete.
    *
@@ -1493,7 +1640,10 @@ export default function ExpenseListScreen({
     // The list the held row's position belonged to is about to be replaced.
     endUndoWindow("reload");
 
-    const categoryId = filter?.id;
+    /* The page's own category wins over Home's ⋯ pick. On the category page
+     * `filter` is always null anyway — there is no ⋯ sheet to set it — but
+     * written this way the prop cannot be lost even if that changes. */
+    const categoryId = categoryOnly ?? filter?.id;
 
     const first = readPage(rangeRef.current, 0, categoryId, titleOnly);
     offsetRef.current = first.length;
@@ -1524,7 +1674,10 @@ export default function ExpenseListScreen({
      * would have nowhere honest to put it. */
     endUndoWindow("applyFilter");
 
-    const categoryId = choice?.id;
+    /* THE LINE THAT KEEPS THIS PAGE HONEST. applyFilter(null) is called from
+     * four places that all mean "show everything", and on the category page
+     * everything still means this category. */
+    const categoryId = categoryOnly ?? choice?.id;
 
     const t0 = Date.now();
     const first = readPage(rangeRef.current, 0, categoryId, titleOnly);
@@ -1728,27 +1881,48 @@ export default function ExpenseListScreen({
   useFocusEffect(
     useCallback(() => {
       /*
-       * Above the early return below, so it runs on every focus rather than
-       * only when the filter is still valid.
-       *
-       * The same object is kept when nothing changed. A fresh map every time
-       * would be a new value, which changes extraData, which redraws every row
-       * on screen for nothing.
+       * Both above the early return below, so they run on every focus rather
+       * than only when the filter is still valid. Each keeps what it already
+       * had when nothing changed, so neither costs a redraw for nothing.
        */
-      const nextIcons = readCategoryIcons();
-      const nextKey = iconsSignature(nextIcons);
-      setIcons((prev) =>
-        prev.key === nextKey ? prev : { map: nextIcons, key: nextKey },
-      );
+      refreshIcons("focus");
+      refreshCategory("focus");
 
-      if (filter && !readCategories().some((c) => c.id === filter.id)) {
-        if (__DEV__) {
-          console.log(
-            `[${screen}] check: filtered category gone → show all`,
-          );
+      if (filter) {
+        const live = readCategories().find((c) => c.id === filter.id);
+
+        /* Deleted on Categories. `filter` holds an id with no row behind it:
+         * the list would return 0 rows and ৳0, both correct, under a header
+         * naming a category that is gone. */
+        if (!live) {
+          if (__DEV__) {
+            console.log(`[${screen}] check: filtered category gone → show all`);
+          }
+          applyFilter(null);
+          return;
         }
-        applyFilter(null);
-        return;
+
+        /*
+         * Renamed somewhere else — which, since 6h, means renamed on its own
+         * category page. `filter` carries the NAME as well as the id, because
+         * the top card's label reads it without a second lookup. Nothing else
+         * re-reads that name, so without this Home keeps showing the old one
+         * until the filter is changed by hand.
+         *
+         * No re-read of the list: the rows are the same rows. Only the word
+         * on the card is wrong, so only the word is replaced.
+         *
+         * This runs again once, because `filter` is in this callback's
+         * dependencies, and the second pass finds the names equal and stops.
+         */
+        if (live.name !== filter.name) {
+          if (__DEV__) {
+            console.log(
+              `[${screen}] check: filter renamed ${filter.name} -> ${live.name}`,
+            );
+          }
+          setFilter(live);
+        }
       }
 
       const version = expenseVersion();
@@ -1761,7 +1935,7 @@ export default function ExpenseListScreen({
         );
       }
       if (stale) reload();
-    }, [filter, screen]),
+    }, [filter, screen, refreshIcons, refreshCategory]),
   );
 
   /*
@@ -1827,12 +2001,38 @@ export default function ExpenseListScreen({
         if (!own) applyFilter(null);
       });
 
+      /*
+       * The category counter, for the icons.
+       *
+       * The focus check used to be enough, because an icon could only be
+       * picked on the Categories tab, which meant this screen was blurred.
+       * 6h puts the picker on a page that IS this screen, and a screen
+       * cannot blur for its own write.
+       *
+       * No seen-ref bookkeeping, unlike the expense listener above. Hearing
+       * your own icon write is exactly what has to happen here, and the
+       * re-read is one thirteen-row query that changes nothing on screen
+       * unless the map really moved.
+       */
+      const stopHearingCategories = onCategoriesChanged(() => {
+        refreshIcons("heard");
+        /* The category page's own rename and icon pick land here. This is the
+         * screen that wrote them, so there is nothing to blur and no focus
+         * check coming — this listener is the only thing that redraws the
+         * card. */
+        refreshCategory("heard");
+      });
+
       return () => {
         stopAddListening();
         stopHearing();
+        stopHearingCategories();
         endUndoWindow("leaving the screen");
       };
-    }, []),
+      /* refreshIcons depends only on `screen`, which never changes for a
+       * copy, so this callback is still made once at the first render —
+       * exactly as the note above describes. */
+    }, [refreshIcons, refreshCategory]),
   );
 
   const loadMore = () => {
@@ -1850,7 +2050,7 @@ export default function ExpenseListScreen({
     const next = readPage(
       rangeRef.current,
       offsetRef.current,
-      filter?.id,
+      categoryOnly ?? filter?.id,
       titleOnly,
     );
     offsetRef.current += next.length;
@@ -2030,7 +2230,11 @@ export default function ExpenseListScreen({
      */
     const stillInView =
       (!filter || filter.id === categoryId) &&
-      (titleOnly === undefined || sameTitle(title, titleOnly));
+      (titleOnly === undefined || sameTitle(title, titleOnly)) &&
+      /* Moving an expense to another category takes it off this page, the
+       * same way renaming one off the title page does. An id against an id,
+       * so no collation question arises here. */
+      (categoryOnly === undefined || categoryOnly === categoryId);
 
     if (stillInView) {
       /*
@@ -2203,10 +2407,59 @@ export default function ExpenseListScreen({
     endUndoWindow("undoDelete");
   };
 
-  const empty =
-    titleOnly !== undefined
-      ? titleEmptyText(titleOnly, period)
+  const empty = isTitle
+    ? titleEmptyText(titleOnly, period)
+    : isCategory
+      ? categoryEmptyText(categoryDetail?.name ?? "this category", period)
       : emptyText(filter, range);
+
+  /*
+   * The big line on the card: a title on the title page, the category's name
+   * on the category page, nothing on Home.
+   *
+   * The name comes from categoryDetail, which is re-read, rather than from
+   * the prop, which is an id. That is what makes a rename show up here.
+   */
+  const heroHeading = isTitle
+    ? titleOnly
+    : isCategory
+      ? categoryDetail?.name ?? ""
+      : null;
+
+  /*
+   * The big circle on the category page's card.
+   *
+   * iconForRow, the SAME function every list row uses, so the 72 circle on the
+   * card and the 40 circles below it can never disagree about this category's
+   * icon or its colour. A category with no icon chosen gets the grey circle
+   * and the receipt here too, so unset looks unset at both sizes.
+   */
+  const heroIcon = isCategory
+    ? /* While editing, the circle shows what has been PICKED, not what is
+       * stored — so the sheet closing changes the card at once and ✕ puts the
+       * old one back without anything being written. */
+      renaming
+      ? iconFor(categoryOnly, iconDraft ?? undefined)
+      : iconForRow(categoryOnly, icons.map)
+    : null;
+
+  /*
+   * Uncategorised keeps its placeholder, so its circle never becomes a
+   * button.
+   *
+   * setCategoryIcon throws on that row, and the throw is the guarantee. This
+   * is the experience: a control that cannot work should not be there to tap.
+   * The same split deleteCategory already makes on the Categories screen.
+   *
+   * Renaming it is still allowed — renameCategory writes `name` and leaves
+   * `id` alone, so the insert fallback and the delete target keep working.
+   */
+  const canPickIcon = isCategory && categoryOnly !== UNCATEGORISED_ID;
+
+  /* The colour the sheet draws a picked icon in: this category's own. */
+  const pickerShade = isCategory
+    ? shadeForCategory(categoryOnly)
+    : PLACEHOLDER_SHADE;
 
   /*
    * The card's two lines of words, worked out here so the JSX stays plain.
@@ -2219,20 +2472,18 @@ export default function ExpenseListScreen({
    *                Title page: "Spent this month", "Spent this year" or
    *                "Spent in total".
    */
-  const periodLine =
-    titleOnly !== undefined
-      ? formatPeriod(period, range)
+  const periodLine = hasPeriodMenu
+    ? formatPeriod(period, range)
+    : range
+      ? formatMonth(range)
+      : null;
+  const cardLabel = hasPeriodMenu
+    ? periodLabel(period)
+    : filter
+      ? filter.name
       : range
-        ? formatMonth(range)
-        : null;
-  const cardLabel =
-    titleOnly !== undefined
-      ? periodLabel(period)
-      : filter
-        ? filter.name
-        : range
-          ? "Spent this month"
-          : "Spent Recently";
+        ? "Spent this month"
+        : "Spent Recently";
 
   return (
     /*
@@ -2241,7 +2492,7 @@ export default function ExpenseListScreen({
      */
     <SafeAreaView
       style={styles.screen}
-      edges={titleOnly !== undefined ? SAFE_EDGES_ALL : SAFE_EDGES}
+      edges={screen === "title" ? SAFE_EDGES_ALL : SAFE_EDGES}
     >
       {/* With the header gone, the clock and battery sit straight on the
           black page. The system draws them dark by default, which would be
@@ -2252,8 +2503,9 @@ export default function ExpenseListScreen({
 
       {/* The title page's bar: only ‹, on the black above the card. The
           title itself is on the card. Back pops this page off the root
-          stack, and Home underneath runs its focus check. */}
-      {titleOnly !== undefined && (
+          stack, and Home underneath runs its focus check. The category page
+          draws the same bar, and its ‹ pops back to the Categories list. */}
+      {hasPeriodMenu && (
         <View style={styles.bar}>
           <Pressable
             accessibilityRole="button"
@@ -2276,7 +2528,7 @@ export default function ExpenseListScreen({
           // Title page only: where the card is on the page, for the menu
           // layer. Home has no menu, so it skips the extra render.
           onLayout={
-            titleOnly !== undefined
+            hasPeriodMenu
               ? (e) => {
                   const { x, y, width } = e.nativeEvent.layout;
                   setHeroFrame({ x, y, width });
@@ -2285,21 +2537,26 @@ export default function ExpenseListScreen({
           }
         >
           <View style={styles.heroTop}>
-            {/* The 3-dot. On Home it opens the category sheet; on the title
-                page, the small period menu. dotsRef lets openMenu measure
-                where it sits in the card. */}
+            {/* The ⋯ goes away while the name is being edited: changing the
+                period would re-read the list under the dim layer. A spacer of
+                its exact size takes its place, so the card does not jump.
+
+                The 3-dot. On Home it opens the category sheet; on the title
+                page and the category page, the small period menu. dotsRef lets
+                openMenu measure where it sits in the card. */}
+            {renaming ? (
+              <View style={styles.heroIconButton} />
+            ) : (
             <Pressable
               ref={dotsRef}
               accessibilityRole="button"
               accessibilityLabel={
-                titleOnly !== undefined
-                  ? "Choose a period"
-                  : "Filter by category"
+                hasPeriodMenu ? "Choose a period" : "Filter by category"
               }
               android_ripple={RIPPLE_ON_LIGHT}
               style={({ pressed }) => [styles.heroIconButton, iosPressed(pressed)]}
               onPress={
-                titleOnly !== undefined
+                hasPeriodMenu
                   ? openMenu
                   : () => {
                       endUndoWindow("⋯ sheet");
@@ -2310,21 +2567,96 @@ export default function ExpenseListScreen({
             >
               <Ionicons name="ellipsis-horizontal" size={20} color={INK} />
             </Pressable>
+            )}
           </View>
 
-          {/* The title page's title, in the white space Home leaves empty
-              above the month. */}
-          {titleOnly !== undefined && (
-            <Text style={styles.heroTitle} numberOfLines={1}>
-              {titleOnly}
-            </Text>
+          {/* The category's own icon, big. YOURS TO RESTYLE: the size.
+
+              It is a button only while the card is being edited. The pencil
+              already means "I am changing this category"; a circle that wrote
+              whenever it was tapped would save without ✓ ever being pressed,
+              and ✕ would have nothing to undo. */}
+          {heroIcon &&
+            (renaming && canPickIcon ? (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Choose an icon"
+                android_ripple={RIPPLE_ON_LIGHT}
+                style={({ pressed }) => [
+                  styles.heroCircle,
+                  { backgroundColor: heroIcon.tint },
+                  iosPressed(pressed),
+                ]}
+                onPress={() => setPickerOpen(true)}
+              >
+                <Ionicons
+                  name={heroIcon.name}
+                  size={62}
+                  color={heroIcon.color}
+                />
+
+                {/* The "this can be changed" overlay, on only while editing.
+
+                    It survives a pick, because it is drawn over whatever icon
+                    the circle is currently showing rather than over a
+                    particular one.
+
+                    pointerEvents none, or it would swallow the tap meant for
+                    the Pressable it sits inside. */}
+                <View style={styles.heroCircleScrim}>
+                  <View style={styles.heroCirclePencil}>
+                    <Ionicons name="pencil" size={22} color="#FFFFFF" />
+                  </View>
+                </View>
+              </Pressable>
+            ) : (
+              <View
+                style={[styles.heroCircle, { backgroundColor: heroIcon.tint }]}
+              >
+                <Ionicons
+                  name={heroIcon.name}
+                  /* Half the circle, the same ratio every list row uses:
+                   * a 20 glyph in a 40 circle. */
+                  size={62}
+                  color={heroIcon.color}
+                />
+              </View>
+            ))}
+
+          {/* The title, or the category's name, in the white space Home
+              leaves empty above the month. While renaming, the name is a
+              field holding what was typed — NOT the row's current name, or
+              every keystroke would be thrown away by the next render. */}
+          {renaming ? (
+            <TextInput
+              style={styles.heroNameInput}
+              value={nameDraft ?? ""}
+              onChangeText={setNameDraft}
+              placeholder="Category name"
+              placeholderTextColor="#8E8E93"
+              /* On this emulator autoFocus does NOT raise the keyboard — a
+               * tap on the field does. That is the AVD, not this code. */
+              autoFocus
+              returnKeyType="done"
+              onSubmitEditing={saveRename}
+            />
+          ) : (
+            heroHeading !== null && (
+              <Text style={styles.heroTitle} numberOfLines={1}>
+                {heroHeading}
+              </Text>
+            )
           )}
+
+          {nameError ? (
+            <Text style={styles.heroError}>{nameError}</Text>
+          ) : null}
 
           {periodLine !== null && (
             <Text
               style={[
                 styles.monthLabel,
-                titleOnly !== undefined && styles.monthLabelUnderTitle,
+                hasPeriodMenu && styles.monthLabelUnderTitle,
               ]}
               numberOfLines={1}
             >
@@ -2332,23 +2664,40 @@ export default function ExpenseListScreen({
             </Text>
           )}
 
-          {/* numberOfLines is what actually truncates. Without it a long
+          {/* "SPENT THIS MONTH" is dropped on the category page and nowhere
+              else. Its card already carries five stacked lines against the two
+              in the design it was drawn from, and this is the one of them that
+              repeats what the period line above it has just said.
+
+              Home, All and the title page are untouched: on Home this line is
+              the picked category's name, which nothing else shows.
+
+              numberOfLines is what actually truncates. Without it a long
               category name wraps to a second line and pushes the total down. */}
+          {!isCategory && (
+            <Text
+              style={[
+                styles.headerLabel,
+                periodLine !== null && styles.headerLabelUnderMonth,
+              ]}
+              numberOfLines={1}
+            >
+              {cardLabel}
+            </Text>
+          )}
+
+          {/* With the label gone the total would sit 6 under the month, which
+              is tighter than any other gap on this card. */}
           <Text
             style={[
-              styles.headerLabel,
-              periodLine !== null && styles.headerLabelUnderMonth,
+              styles.headerTotal,
+              isCategory && styles.headerTotalUnderMonth,
             ]}
-            numberOfLines={1}
           >
-            {cardLabel}
-          </Text>
-
-          <Text style={styles.headerTotal}>
             {formatMoney(totals.totalMinor, DEFAULT_CURRENCY)}
           </Text>
 
-          {titleOnly !== undefined ? (
+          {hasPeriodMenu ? (
             /* The count sits where Home has its +. Its box has no fixed
                height, so this card is shorter than Home's. */
             <View style={styles.heroCountBox}>
@@ -2370,6 +2719,64 @@ export default function ExpenseListScreen({
             >
               <Ionicons name="add" size={30} color="#FFFFFF" />
             </Pressable>
+          )}
+
+          {/* The card's own controls, category page only.
+              YOURS TO RESTYLE: the sizes and where they sit.
+
+              Resting: the pencil alone, on the right.
+              Editing: ✕ on the left to throw the typing away, ✓ on the right
+              to write it. One row in two shapes, so neither button moves
+              between the two states. */}
+          {isCategory && (
+            <View
+              style={[styles.heroActions, renaming && styles.heroActionsEdit]}
+            >
+              {renaming ? (
+                <>
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="Cancel renaming"
+                    android_ripple={RIPPLE_ON_LIGHT}
+                    style={({ pressed }) => [
+                      styles.heroIconButton,
+                      iosPressed(pressed),
+                    ]}
+                    onPress={cancelRename}
+                    hitSlop={12}
+                  >
+                    <Ionicons name="close" size={22} color={INK} />
+                  </Pressable>
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="Save the name"
+                    android_ripple={RIPPLE_ON_LIGHT}
+                    style={({ pressed }) => [
+                      styles.heroIconButton,
+                      iosPressed(pressed),
+                    ]}
+                    onPress={saveRename}
+                    hitSlop={12}
+                  >
+                    <Ionicons name="checkmark" size={22} color={INK} />
+                  </Pressable>
+                </>
+              ) : (
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Rename this category"
+                  android_ripple={RIPPLE_ON_LIGHT}
+                  style={({ pressed }) => [
+                    styles.heroIconButton,
+                    iosPressed(pressed),
+                  ]}
+                  onPress={startRename}
+                  hitSlop={12}
+                >
+                  <Ionicons name="pencil" size={20} color={INK} />
+                </Pressable>
+              )}
+            </View>
           )}
         </View>
       ) : (
@@ -2499,7 +2906,7 @@ export default function ExpenseListScreen({
                     <Text style={styles.emptyActionText}>Show all</Text>
                   </Pressable>
                 )}
-                {titleOnly !== undefined && period !== "all" && (
+                {hasPeriodMenu && period !== "all" && (
                   <Pressable
                     accessibilityRole="button"
                     android_ripple={RIPPLE_ROUND}
@@ -2539,12 +2946,36 @@ export default function ExpenseListScreen({
                   onEdit={openEdit}
                   onDelete={deleteRow}
                   onWillOpen={closePreviousRow}
-                  onOpen={titleOnly === undefined ? openTitle : null}
+                  /* A tap opens that expense's title page — from Home, from
+                     All and from a category page. Only the title page itself
+                     kills it, because every card there is already that
+                     title. */
+                  onOpen={isTitle ? null : openTitle}
                 />
               );
             }}
           />
         </Profiler>
+
+        {/* The list goes out of focus while the card is being edited.
+
+            A plain dim rather than a real frosted blur: a blur needs a native
+            package and a fresh development build. rgba(0,0,0,0.6) is the same
+            backdrop the add sheet already uses. Over the list it leaves a
+            card's text reading 3.07 against its own dimmed card — recessed,
+            still shaped like a list [V, computed].
+
+            Inside this view, so it covers the LIST and not the top card. A
+            tap on it cancels the edit, which is the same free way out the
+            period menu has. */}
+        {renaming && (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Cancel renaming"
+            style={styles.dim}
+            onPress={cancelRename}
+          />
+        )}
       </Animated.View>
 
       {/*
@@ -2654,7 +3085,7 @@ export default function ExpenseListScreen({
       {/* The category sheet is Home's ⋯. The title page's ⋯ opens the
           period menu below instead, so the sheet is not drawn there at
           all. */}
-      {titleOnly === undefined && (
+      {!hasPeriodMenu && (
         <CategorySheet
           visible={sheetOpen}
           // The same range the list and the total behind the sheet were read
@@ -2671,6 +3102,24 @@ export default function ExpenseListScreen({
             setSheetOpen(false);
             router.push("/categories" as never);
           }}
+        />
+      )}
+
+      {/* The icon catalog. Only the category page ever renders it, and only
+          its card can open it. */}
+      {isCategory && (
+        <IconPicker
+          visible={pickerOpen}
+          selected={iconDraft}
+          color={pickerShade.color}
+          tint={pickerShade.tint}
+          /* Picking closes the sheet and fills the circle. Nothing is written
+             until ✓ — see saveRename. */
+          onPick={(name) => {
+            setIconDraft(name);
+            setPickerOpen(false);
+          }}
+          onClose={() => setPickerOpen(false)}
         />
       )}
 
@@ -2714,7 +3163,7 @@ export default function ExpenseListScreen({
         YOURS TO RESTYLE: menu, menuItem, menuItemDivider, menuText in the
         styles below.
       */}
-      {titleOnly !== undefined && menuAt && heroFrame && (
+      {hasPeriodMenu && menuAt && heroFrame && (
         <View style={StyleSheet.absoluteFill}>
           <Pressable
             style={StyleSheet.absoluteFill}
@@ -2829,6 +3278,47 @@ const styles = StyleSheet.create({
     marginTop: 6,
     fontVariant: ["tabular-nums"],
   },
+  /*
+   * The edit-mode overlay on the big circle. YOURS TO RESTYLE: the two
+   * alphas and the disc.
+   *
+   * Black and not white. Every circle colour in the palette is dark, and the
+   * glyph on it is bright — a white veil washes the glyph out, a black one
+   * dims it evenly. Measured across all twelve pairs plus the grey
+   * placeholder [V, computed]:
+   *
+   *   the glyph against its own circle, through the veil   2.39 at worst
+   *                                     (3.54 without it)
+   *   the white pencil on its disc                         8.75 at worst
+   *   the circle against the white card                   13.17 at worst
+   *
+   * Two layers rather than one. A single veil strong enough to carry a white
+   * pencil would take the glyph down to 1.9, and a pencil laid straight on a
+   * yellow glyph reads 2.13 — invisible. So the veil stays light enough to
+   * keep the icon, and the pencil brings its own dark disc with it.
+   *
+   * pointerEvents none: the tap belongs to the Pressable underneath.
+   */
+  heroCircleScrim: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: "rgba(0,0,0,0.30)",
+    alignItems: "center",
+    justifyContent: "center",
+    pointerEvents: "none",
+  },
+  heroCirclePencil: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: "rgba(0,0,0,0.55)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  /* Category page only, where there is no uppercase label between the month
+   * and the total. 12 ≈ the 4 + 6 the two margins used to add up to, plus a
+   * little of the height the label itself took. YOURS TO RESTYLE. */
+  headerTotalUnderMonth: { marginTop: 12 },
   heroAdd: {
     width: 56,
     height: 56,
@@ -2857,6 +3347,86 @@ const styles = StyleSheet.create({
     maxWidth: "100%",
   },
   monthLabelUnderTitle: { marginTop: 16 },
+
+  /*
+   * YOURS TO RESTYLE — the category page's big icon circle.
+   *
+   * 124, which is 32% of the card's 388 width — the share measured off your
+   * own drawing. 124 rather than 125 only so the radius is a whole number.
+   *
+   * The card's width came from a dev line, not from a ruler: openMenu prints
+   * "⋯ at 332 … right 20", the ⋯ button is 36 wide, and 332 + 36 + 20 = 388.
+   *
+   * borderRadius is ALWAYS half the width. Anything less and the circle
+   * becomes a rounded square.
+   *
+   * No backgroundColor here: every category supplies its own, from its colour
+   * or from the grey placeholder, so one declared here would never apply.
+   */
+  heroCircle: {
+    width: 124,
+    height: 124,
+    borderRadius: 62,
+    /* Keeps the Android ripple round once this becomes a button, and trims
+     * the overlay below to the same circle. The circle has no shadow, so it
+     * cuts nothing off on iOS either. */
+    overflow: "hidden",
+    alignItems: "center",
+    justifyContent: "center",
+    marginTop: 8,
+  },
+
+  /*
+   * YOURS TO RESTYLE — the name as a field. Same size and weight as
+   * heroTitle, so the card does not change height when editing starts.
+   *
+   * paddingVertical: 0 because Android gives a TextInput vertical padding of
+   * its own, which would make this taller than the Text it replaces.
+   * alignSelf: "stretch" so a long name has the whole card to use.
+   */
+  heroNameInput: {
+    alignSelf: "stretch",
+    marginTop: 8,
+    paddingVertical: 0,
+    paddingHorizontal: 12,
+    height: 44,
+    borderRadius: 10,
+    backgroundColor: "#F2F2F7",
+    color: INK,
+    fontSize: 24,
+    fontWeight: "700",
+    textAlign: "center",
+  },
+  /* renameCategory's message. NOT the app's usual #E5484D: that red reads
+   * 3.91 on this white card, and a line of 13px text wants more. #C62B30
+   * reads 5.54 [V, computed]. The field behind the name is #F2F2F7, the same
+   * pair the ⋯ button already uses on this card. */
+  heroError: {
+    color: "#C62B30",
+    fontSize: 13,
+    marginTop: 8,
+    textAlign: "center",
+  },
+  /*
+   * YOURS TO RESTYLE — the card's own controls. flex-end at rest puts the
+   * single pencil on the right; space-between while editing pushes ✕ and ✓
+   * to the two edges without either of them moving in the JSX.
+   */
+  heroActions: {
+    alignSelf: "stretch",
+    flexDirection: "row",
+    justifyContent: "flex-end",
+    marginTop: 16,
+  },
+  heroActionsEdit: { justifyContent: "space-between" },
+
+  /* The layer that takes the list out of focus. absoluteFillObject rather
+   * than absoluteFill, because this is one entry in a StyleSheet, not an
+   * array of styles. */
+  dim: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: "rgba(0,0,0,0.6)",
+  },
   /*
    * No height, so the box is exactly as tall as the count's text.
    * justifyContent: "center" went with the height: it only centres inside

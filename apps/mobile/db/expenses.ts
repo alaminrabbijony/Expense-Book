@@ -1378,3 +1378,87 @@ export const readCategoryIcons = (): CategoryIcons => {
   for (const r of rows) map[r.id] = r.icon_name;
   return map;
 };
+/*
+ * One category's name and icon, for a screen that shows a single category.
+ *
+ * A separate type rather than widening Category. That one is handed around by
+ * readCategories, the ⋯ sheet's picker and the add form's picker, and none of
+ * the three has any use for an icon.
+ */
+export type CategoryDetail = {
+  id: string;
+  name: string;
+  iconName: string | null;
+};
+
+/**
+ * One category by id, or null if there is no such row.
+ *
+ * null is an ANSWER here, not a failure. A category page can sit on another
+ * tab while that category is deleted, and this is how the page finds out.
+ * readCategories().find(...) would reach the same value by reading all
+ * thirteen rows, and could not say "this one is gone" any more clearly.
+ *
+ * icon_name is nullable, and null means nobody has picked an icon — the same
+ * meaning readCategoryIcons gives by leaving those rows out of its map.
+ *
+ * A lookup by PRIMARY KEY, so SQLite goes straight to the one row.
+ */
+export const readCategoryDetail = (id: string): CategoryDetail | null => {
+  const rows = all<{ id: string; name: string; icon_name: string | null }>(
+    `SELECT id, name, icon_name FROM categories WHERE id = ?`,
+    [id],
+  );
+  const row = rows[0];
+  if (!row) return null;
+  return { id: row.id, name: row.name, iconName: row.icon_name };
+};
+/**
+ * Set or clear one category's icon.
+ *
+ * @param iconName A name the icon font actually has, or null to put the
+ *   category back to having no icon chosen.
+ * @throws If the id does not exist, or is the uncategorised row.
+ */
+export const setCategoryIcon = (id: string, iconName: string | null): void => {
+  /*
+   * Uncategorised means "not sorted yet", and the placeholder glyph is the
+   * one thing on screen that says so. An icon here would make it look like a
+   * choice somebody made. Blocked at the write as well as in the picker, for
+   * the reason deleteCategory gives about its own guard: a screen with
+   * manners is not a rule.
+   */
+  if (id === UNCATEGORISED_ID) {
+    throw new Error("The Uncategorised category keeps its placeholder icon.");
+  }
+
+  /*
+   * Read before writing, the same guard as renameCategory. An UPDATE that
+   * matches no row changes nothing and throws nothing, so a page open on a
+   * category deleted from another tab would look exactly like a save.
+   */
+  const existing = all<{ id: string }>(
+    `SELECT id FROM categories WHERE id = ?`,
+    [id],
+  );
+  if (existing.length === 0) {
+    throw new Error(`No category with id "${id}".`);
+  }
+
+  /*
+   * An empty string becomes NULL rather than being stored as itself. The
+   * column is plain TEXT with no CHECK, so '' writes cleanly and then draws a
+   * literal "?" on every card in that category — the same hole
+   * cleanCategoryName exists to close for names.
+   */
+  const clean = iconName?.trim() ? iconName.trim() : null;
+
+  run(`UPDATE categories SET icon_name = ? WHERE id = ?`, [clean, id]);
+
+  /*
+   * After the UPDATE, never before. Only the category counter: no expense row
+   * changed, and from this session an expense list redraws its icons by
+   * listening to THIS counter rather than the expense one.
+   */
+  bumpCategories("setCategoryIcon");
+};

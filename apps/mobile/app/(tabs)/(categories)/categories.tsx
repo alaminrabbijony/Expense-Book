@@ -1,19 +1,25 @@
+import { PLACEHOLDER_SHADE, shadeForCategory } from "@/comp/categoryIcon";
 import CategoryManageList from "@/comp/CategoryManageList";
+import IconPicker from "@/comp/IconPicker";
 import { categoryVersion, onCategoriesChanged } from "@/db/changes";
 import {
   deleteCategory,
   insertCategory,
   readCategories,
+  readCategoryIcons,
   readTotals,
   renameCategory,
+  setCategoryIcon,
   UNCATEGORISED_ID,
   type Category,
+  type CategoryIcons,
 } from "@/db/expenses";
 import { DEFAULT_CURRENCY, formatMoney, type Minor } from "@et/shared";
 import { router, useFocusEffect } from "expo-router";
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
+  Keyboard,
   LayoutAnimation,
   Modal,
   Pressable,
@@ -25,8 +31,6 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
-
-
 /*
  * Which edges the SafeAreaView pads. Not the bottom: the tab bar below this
  * screen already pads for the system navigation bar, and SafeAreaView pads
@@ -34,6 +38,12 @@ import { SafeAreaView } from "react-native-safe-area-context";
  * at SAFE_EDGES in comp/ExpenseListScreen.tsx.
  */
 const SAFE_EDGES = ["top", "left", "right"] as const;
+
+/*
+ * How far above the editing row to stop scrolling, so it does not sit
+ * jammed against the pill. YOURS TO RESTYLE.
+ */
+const SCROLL_GAP = 12;
 
 // What the confirm modal needs to know. Read at the moment Delete is
 // tapped, not held for every row — readTotals(id) is a two-aggregate query
@@ -58,11 +68,12 @@ export default function Categories() {
    *
    *   a fresh read     the initialiser below, and readFresh in the focus
    *                    effect.
-   *   this screen's    save (add and rename) and confirmDelete. Each one
-   *   own write        updates `items` itself straight after its write, so
-   *                    the new version is already shown. Marked seen inside
-   *                    the handler, so the listener — told in a microtask,
-   *                    after the handler returns — finds nothing to do.
+   *   this screen's    save (add, rename and icon) and confirmDelete. Each
+   *   own write        one updates `items` itself straight after its write,
+   *                    so the new version is already shown. Marked seen
+   *                    inside the handler, so the listener — told in a
+   *                    microtask, after the handler returns — finds nothing
+   *                    to do.
    *
    * A ref, not state: nothing draws it, and the focus effect is created once,
    * so it must read the current value rather than the first render's.
@@ -88,6 +99,21 @@ export default function Categories() {
     return first;
   });
 
+  /*
+   * Which categories have an icon. A separate read, because readCategories
+   * does not carry the icon — that is why readCategoryDetail exists with a
+   * type of its own.
+   *
+   * Both initialisers run during the same render, with nothing awaited
+   * between them, so the icons cannot be from a different moment than the
+   * names.
+   *
+   * It needs no version of its own: icons live on the categories table, so
+   * the counter that already tells this screen about a rename tells it about
+   * an icon too.
+   */
+  const [icons, setIcons] = useState<CategoryIcons>(() => readCategoryIcons());
+
   // The field's three pieces of state.
   //
   // open   — is the field revealed at all
@@ -101,20 +127,86 @@ export default function Categories() {
   const [draft, setDraft] = useState("");
   const [editId, setEditId] = useState<string | null>(null);
 
-  // Where insertCategory's and renameCategory's throw messages land. They
-  // were written to be read by a person: "Category name cannot be empty."
-  // and 'A category called "Food" already exists.'
+  /*
+   * The icon picked for the row being edited, but not yet written. null is a
+   * real choice here — it is how an icon is taken away again — so "untouched"
+   * is NOT spelled with null. It is seeded from the row in openEdit, which is
+   * what makes it always mean something while editing.
+   */
+  const [iconDraft, setIconDraft] = useState<string | null>(null);
+  const [pickerOpen, setPickerOpen] = useState(false);
+
+  // Where insertCategory's, renameCategory's and setCategoryIcon's throw
+  // messages land. They were written to be read by a person: "Category name
+  // cannot be empty." and 'A category called "Food" already exists.'
   const [error, setError] = useState<string | null>(null);
 
   const [pending, setPending] = useState<Pending | null>(null);
   const [busy, setBusy] = useState(false);
 
+  /* The scrolling list, and where each row sits inside it. The positions are
+   * a ref: nothing on screen draws them, and a row reporting its layout must
+   * not cause a render. */
+  const scrollRef = useRef<ScrollView>(null);
+  const rowTopsRef = useRef<Record<string, number>>({});
+
+  const onRowLayout = useCallback((id: string, y: number) => {
+    rowTopsRef.current[id] = y;
+  }, []);
+
+  /*
+   * How tall the keyboard is right now, 0 when it is down.
+   *
+   * Keyboard.addListener is React Native's own, and it is where the
+   * "keyboard show: height 312" line in the log already comes from. On
+   * Android only the "Did" events fire, so this arrives once the keyboard
+   * has finished moving — which is all that is needed here. This number
+   * becomes scrollable room at the bottom of the list, not an animation.
+   */
+  const [kbHeight, setKbHeight] = useState(0);
+
+  useEffect(() => {
+    const shown = Keyboard.addListener("keyboardDidShow", (e) =>
+      setKbHeight(e.endCoordinates.height),
+    );
+    const hidden = Keyboard.addListener("keyboardDidHide", () =>
+      setKbHeight(0),
+    );
+    return () => {
+      shown.remove();
+      hidden.remove();
+    };
+  }, []);
+
+  /*
+   * Bring the row being edited out from under the keyboard.
+   *
+   * IT DEPENDS ON kbHeight AS WELL AS editId, and that is the whole
+   * mechanism. Tapping Edit and the keyboard appearing are two different
+   * moments: the pill's field has autoFocus, so the keyboard arrives a beat
+   * later and brings the extra room with it. Run on editId alone and the
+   * scroll happens while the list still ends 40 below the last row — it gets
+   * clamped short and the row stays half covered, with nothing thrown.
+   *
+   * A row with no recorded position has not been laid out yet; its own
+   * onLayout will arrive and this runs again on the next change.
+   */
+  useEffect(() => {
+    if (editId === null) return;
+    const y = rowTopsRef.current[editId];
+    if (y === undefined) return;
+    scrollRef.current?.scrollTo({
+      y: Math.max(0, y - SCROLL_GAP),
+      animated: true,
+    });
+  }, [editId, kbHeight]);
+
   /*
    * Keeps `items` true while this tab stays mounted. Two moments:
    *
    *   on focus       the version moved while this tab was hidden — for
-   *                  example a category made in the add sheet on Home.
-   *                  Re-read once.
+   *                  example a category made in the add sheet on Home, or
+   *                  an icon picked on a category page.
    *   while focused  listen. A category made in the add sheet opened from
    *                  this tab's + lands while this list is on screen.
    *                  Re-read when the version is not this screen's own.
@@ -128,7 +220,7 @@ export default function Categories() {
    * counter.
    *
    * Empty dependencies: created once. Safe because readFresh only uses
-   * readCategories, a setter and a ref — no state.
+   * readCategories, readCategoryIcons, two setters and a ref — no state.
    *
    * The dev lines print every time, including "up to date" and "own write",
    * so a check that never ran cannot look like one that ran and found
@@ -138,6 +230,10 @@ export default function Categories() {
     useCallback(() => {
       const readFresh = () => {
         setItems(readCategories());
+        /* Both reads together, for the same reason the two initialisers are
+         * together: the names and the icons on screen should always be from
+         * the same moment. */
+        setIcons(readCategoryIcons());
         seenRef.current = categoryVersion();
       };
 
@@ -167,7 +263,7 @@ export default function Categories() {
     }, []),
   );
 
-   // Every layout change on this screen goes through here. configureNext
+  // Every layout change on this screen goes through here. configureNext
   // applies to the NEXT render only, so it has to be called immediately
   // before the setState that changes the shape — not in an effect after it.
   //
@@ -183,6 +279,9 @@ export default function Categories() {
     animate();
     setEditId(null);
     setDraft("");
+    /* No row, so no circle, so no icon can be picked while adding. Cleared
+     * anyway, so a leftover draft from a previous Edit cannot survive. */
+    setIconDraft(null);
     setError(null);
     setOpen(true);
   };
@@ -191,8 +290,38 @@ export default function Categories() {
     animate();
     setEditId(item.id);
     setDraft(item.name);
+    /* Seeded from what is stored, so the draft always means something while
+     * editing and nothing has to tell "untouched" apart from "cleared". */
+    setIconDraft(icons[item.id] ?? null);
     setError(null);
     setOpen(true);
+    /* The scroll is NOT done here. See the effect above: the room to scroll
+     * into does not exist until the keyboard has arrived. */
+  };
+
+  /*
+   * The editing row's circle was tapped. Open the catalog.
+   *
+   * The keyboard goes first. The pill's field has autoFocus, so it is up, and
+   * the sheet slides in from the bottom — the same place. The add form already
+   * follows this rule: opening its category list calls Keyboard.dismiss(),
+   * because a Pressable never takes focus away by itself.
+   */
+  const openIconPicker = () => {
+    Keyboard.dismiss();
+    setPickerOpen(true);
+  };
+
+  /*
+   * Open a category's own page, pushed INSIDE this tab's stack, so the tab
+   * bar stays on screen and ‹ comes back to this list.
+   *
+   * The id, not the name. A name can hold "/", "%" or "?" and would have to
+   * be encoded on the way through a URL; an id passes through unchanged.
+   * Same rule as /title/[id].
+   */
+  const openCategory = (item: Category) => {
+    router.push({ pathname: "/category/[id]", params: { id: item.id } });
   };
 
   // Not a nicety. Without a way out, tapping Edit puts the screen in a mode
@@ -203,6 +332,10 @@ export default function Categories() {
     setOpen(false);
     setEditId(null);
     setDraft("");
+    /* The picked icon is thrown away with the typed name. Nothing was
+     * written, so there is nothing to undo. */
+    setIconDraft(null);
+    setPickerOpen(false);
     setError(null);
   };
 
@@ -217,32 +350,53 @@ export default function Categories() {
         seenRef.current = categoryVersion();
       } else {
         const id = editId;
-        renameCategory(id, draft);
+        const savedName = items.find((c) => c.id === id)?.name ?? "";
+        const savedIcon = icons[id] ?? null;
+        // .trim() mirrors what cleanCategoryName already does to the value
+        // that reaches the database. Skip it and the screen shows "Food "
+        // while the row says "Food".
+        const clean = draft.trim();
+
+        /*
+         * Only what actually changed is written, and the NAME goes first.
+         *
+         * Each write bumps the categories counter, and every screen holding a
+         * copy of this table re-reads when it hears one — so writing a value
+         * back unchanged costs reads and redraws across the app for nothing.
+         *
+         * Name first because it is the one that can throw: a duplicate, or an
+         * empty string. Thrown there, the icon has not been touched at all.
+         * Two writes, not one transaction — the same shape as saveRename on
+         * the category page.
+         */
+        if (clean !== savedName) renameCategory(id, draft);
+        if (iconDraft !== savedIcon) setCategoryIcon(id, iconDraft);
+
         /* Own write. Marked seen BEFORE the listener runs, so the listener
          * does not re-read — a re-read would sort, and move this row. */
         seenRef.current = categoryVersion();
 
-        // Patch the one row instead of re-reading.
+        // Patch the one NAME instead of re-reading the list.
         //
         // readCategories sorts by name, so a re-read would move the row you
         // just edited to a new position — Food becoming Zomato jumps to the
         // bottom of the list under your finger. The row stays where it is
         // until the list is next re-read: another category write anywhere,
-        // or an app restart. This tab stays mounted, so a tab switch alone
-        // does not re-read it.
-        //
-        // .trim() mirrors what cleanCategoryName already did to the value
-        // that reached the database. Skip it and the screen shows "Food "
-        // while the row says "Food".
-        const clean = draft.trim();
+        // or an app restart.
         setItems((prev) =>
           prev.map((c) => (c.id === id ? { ...c, name: clean } : c)),
         );
+
+        /* The icons, unlike the names, ARE re-read. The map is keyed by id
+         * and nothing on screen is ordered by it, so re-reading it cannot
+         * move a row — the reason the names are patched does not apply. */
+        setIcons(readCategoryIcons());
       }
       cancel();
     } catch (err) {
       // Deliberately does NOT call cancel(). The field keeps what was typed
-      // so it can be corrected, and the row stays struck through.
+      // and the picked icon, so both can be corrected, and the row stays
+      // struck through.
       setError(err instanceof Error ? err.message : String(err));
     }
   };
@@ -278,7 +432,13 @@ export default function Categories() {
       try {
         deleteCategory(id);
         setItems(readCategories());
-        /* Own write, already re-read on the line above. deleteCategory
+        /* The deleted category's icon has to leave the map with it, or the
+         * map keeps an entry for a row nobody can see. */
+        setIcons(readCategoryIcons());
+        /* Its remembered position goes too. Every other row is about to move
+         * up, and a stale y would scroll to the wrong place. */
+        delete rowTopsRef.current[id];
+        /* Own write, already re-read on the lines above. deleteCategory
          * bumps the expense counter too; the list screens catch that on
          * their own focus check. */
         seenRef.current = categoryVersion();
@@ -287,6 +447,8 @@ export default function Categories() {
           setOpen(false);
           setEditId(null);
           setDraft("");
+          setIconDraft(null);
+          setPickerOpen(false);
         }
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err));
@@ -296,6 +458,11 @@ export default function Categories() {
       }
     }, 0);
   };
+
+  /* The colour the catalog draws a picked icon in: the editing category's
+   * own, derived from its id by the same function every circle uses. */
+  const pickerShade =
+    editId === null ? PLACEHOLDER_SHADE : shadeForCategory(editId);
 
   return (
     <SafeAreaView style={styles.screen} edges={SAFE_EDGES}>
@@ -313,7 +480,7 @@ export default function Categories() {
         <View style={styles.backSpacer} />
       </View>
 
-           <View style={styles.fieldArea}>
+      <View style={styles.fieldArea}>
         <View style={[styles.pill, open ? styles.pillOpen : styles.pillClosed]}>
           {open ? (
             <TextInput
@@ -321,7 +488,9 @@ export default function Categories() {
               value={draft}
               onChangeText={setDraft}
               placeholder={editId === null ? "New category" : "Rename to"}
-              placeholderTextColor="#5A606B"
+              /* 5.22 against the pill's surface, computed. The old #5A606B
+               * read 2.69 on it. */
+              placeholderTextColor="#8E8E93"
               autoFocus
               // Enter on the keyboard does the same thing as the knob.
               onSubmitEditing={save}
@@ -329,7 +498,7 @@ export default function Categories() {
             />
           ) : (
             // The label is pressable too, so the whole pill opens, not just
-            // the 44px circle.
+            // the 64px circle.
             <Pressable style={styles.label} onPress={openAdd}>
               <Text style={styles.labelText}>Add</Text>
             </Pressable>
@@ -357,26 +526,55 @@ export default function Categories() {
 
       {/* A route can scroll at screen level, so this does not need the
           bounded-height workaround the sheet's list does. */}
-                {/* Edge to edge, no horizontal inset. The row borders inside
-          CategoryManageList run full width too, so an inset one here would
-          read as a different kind of line. */}
-      <View style={styles.topDivider} />
-            <ScrollView
-        contentContainerStyle={styles.list}
+      <ScrollView
+        ref={scrollRef}
+        /* The keyboard's own height becomes extra room at the bottom, so the
+           last row can be scrolled up above it. Without this the list simply
+           ends 40 below the last card and there is nowhere for it to go.
+           An array rather than a second StyleSheet entry, because the number
+           changes while the app runs. */
+        contentContainerStyle={[styles.list, { paddingBottom: 40 + kbHeight }]}
         // The pill's TextInput has autoFocus, so opening Add puts the
         // keyboard up with these rows still on screen. Under the default,
-        // "never", the first tap on Edit or Delete would only close the
-        // keyboard, and the row would never receive it.
+        // "never", the first tap on Edit, Delete or a circle would only
+        // close the keyboard, and the row would never receive it.
         keyboardShouldPersistTaps="handled"
       >
         <CategoryManageList
           items={items}
+          icons={icons}
           editingId={editId}
+          draftIcon={iconDraft}
           undeletableId={UNCATEGORISED_ID}
+          /* The same id, through a second prop. Two questions — can this be
+           * deleted, can this be given an icon — that happen to share an
+           * answer today. */
+          noIconId={UNCATEGORISED_ID}
+          onOpen={openCategory}
           onEdit={openEdit}
           onDelete={askDelete}
+          onPickIcon={openIconPicker}
+          onRowLayout={onRowLayout}
         />
       </ScrollView>
+
+      {/* The icon catalog. Rendered only while a row is being edited, so
+          nothing holds a 1,357-cell list in the tree the rest of the time. */}
+      {editId !== null && editId !== UNCATEGORISED_ID && (
+        <IconPicker
+          visible={pickerOpen}
+          selected={iconDraft}
+          color={pickerShade.color}
+          tint={pickerShade.tint}
+          /* Picking fills the circle and closes the sheet. NOTHING is written
+             until ✓ — see save. */
+          onPick={(name) => {
+            setIconDraft(name);
+            setPickerOpen(false);
+          }}
+          onClose={() => setPickerOpen(false)}
+        />
+      )}
 
       <Modal
         visible={pending !== null}
@@ -430,7 +628,8 @@ export default function Categories() {
 }
 
 const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: "#0F1115" },
+  // YOURS TO RESTYLE. Black, like every other screen in the app.
+  screen: { flex: 1, backgroundColor: "#000000" },
 
   header: {
     flexDirection: "row",
@@ -444,11 +643,15 @@ const styles = StyleSheet.create({
   backSpacer: { width: 18 },
   title: { color: "#FFFFFF", fontSize: 20, fontWeight: "700" },
 
-   fieldArea: { paddingHorizontal: 20, paddingBottom: 16 },
+  fieldArea: { paddingHorizontal: 20, paddingBottom: 16 },
 
   // Shared by both states. borderRadius is half of minHeight, which is what
   // makes the ends semicircular rather than just rounded.
-    pill: {
+  //
+  // No border any more. No other card in the app has one, and on black the
+  // old #2A2F38 hairline read 1.56 — a line doing nothing the surface was
+  // not already doing.
+  pill: {
     alignItems: "center",
     // Full width in BOTH states now, so it lives here rather than in the
     // two variants below.
@@ -456,27 +659,29 @@ const styles = StyleSheet.create({
     minHeight: 80,
     borderRadius: 40,
     padding: 8,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: "#2A2F38",
   },
   // The ONLY difference between the two states is which way the row runs.
   // row-reverse paints the last child first, which is what puts the knob on
   // the left without moving it in the JSX.
+  //
+  // Both carry the app's card colour, 1.23 against the black page — the same
+  // pair as every list card. They used to differ, so the sentence above is
+  // only now literally true.
   pillClosed: {
     flexDirection: "row-reverse",
-    backgroundColor: "#22262E",
+    backgroundColor: "#1C1C1E",
   },
   pillOpen: {
     flexDirection: "row",
-    backgroundColor: "#171B22",
+    backgroundColor: "#1C1C1E",
   },
 
-     // flex: 1 is not cosmetic. Without it the Pressable is only as wide as
+  // flex: 1 is not cosmetic. Without it the Pressable is only as wide as
   // the word "Add", and the rest of a full-width bar is dead to taps.
   label: { flex: 1, paddingHorizontal: 22 },
-   labelText: { color: "#ECEDEE", fontSize: 19, fontWeight: "600" },
+  labelText: { color: "#ECEDEE", fontSize: 19, fontWeight: "600" },
 
-    input: {
+  input: {
     flex: 1,
     color: "#ECEDEE",
     fontSize: 18,
@@ -485,7 +690,7 @@ const styles = StyleSheet.create({
     // the pill taller than 80 and stop the ends being semicircles.
     paddingVertical: 0,
   },
- clear: { paddingHorizontal: 12 },
+  clear: { paddingHorizontal: 12 },
   clearText: { color: "#8A8F98", fontSize: 18 },
 
   knob: {
@@ -503,9 +708,25 @@ const styles = StyleSheet.create({
     includeFontPadding: false,
     marginTop: -2,
   },
-  error: { color: "#E5484D", fontSize: 13, paddingTop: 8, paddingHorizontal: 12 },
+  error: {
+    color: "#E5484D",
+    fontSize: 13,
+    paddingTop: 8,
+    paddingHorizontal: 12,
+  },
 
-  list: { paddingBottom: 40 },
+  /*
+   * The cards are inset 12 from the screen's edges and start 10 below the
+   * pill — the same two numbers as styles.list in
+   * comp/ExpenseListScreen.tsx, so the two lists line up with each other.
+   *
+   * paddingBottom is set at the call site, not here: it grows by the
+   * keyboard's height while the keyboard is up.
+   */
+  list: {
+    paddingHorizontal: 12,
+    paddingTop: 10,
+  },
 
   backdrop: {
     flex: 1,
@@ -514,9 +735,11 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     paddingHorizontal: 32,
   },
+  /* The app's card colour, 1.23 against the dimmed black page — the same
+   * reading a list card gets against the page it sits on. */
   dialog: {
     width: "100%",
-    backgroundColor: "#171B22",
+    backgroundColor: "#1C1C1E",
     borderRadius: 14,
     padding: 20,
   },
@@ -545,8 +768,4 @@ const styles = StyleSheet.create({
     paddingTop: 20,
   },
   busyText: { color: "#8A8F98", fontSize: 14 },
-    topDivider: {
-    height: StyleSheet.hairlineWidth,
-    backgroundColor: "#22262E",
-  },
 });
