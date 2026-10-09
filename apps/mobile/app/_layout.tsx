@@ -1,31 +1,47 @@
 import Ionicons from "@expo/vector-icons/Ionicons";
+import MaterialCommunityIcons from "@expo/vector-icons/MaterialCommunityIcons";
 import { Stack } from "expo-router";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { KeyboardProvider } from "react-native-keyboard-controller";
 
 /*
- * Load the icon font once, as soon as the app starts.
+ * Load the icon fonts once, as soon as the app starts.
  *
- * An Ionicons icon draws an EMPTY <Text /> until its font has loaded
+ * An icon draws an EMPTY <Text /> until its font has loaded
  * (@expo/vector-icons 15.1.1, createIconSet.js line 79). The swipe buttons
  * are nothing but icons, so without this the first swipe after a launch can
- * show a blank red block. Started here, at module load, the font has the
+ * show a blank red block. Started here, at module load, the fonts have the
  * whole launch to arrive before anyone swipes.
  *
- * The dev line says when it finished, so a blank block can be told apart
- * from a slow load. A failure is logged rather than thrown: the icon then
- * loads itself on first use, which is the same as not preloading at all.
+ * TWO FONTS NOW. A category's icon can come from either: Ionicons, or
+ * MaterialCommunityIcons for the thousands of things Ionicons has no
+ * picture of. Each font is a separate file and each needs its own call —
+ * loading one does nothing for the other.
+ *
+ * They start together and finish independently, so the line says which one
+ * it is talking about. A blank glyph on a card while another font's icons
+ * draw fine is otherwise very hard to read.
+ *
+ * A failure is logged rather than thrown: the font then loads itself on
+ * first use, which is the same as not preloading at all.
  */
-const iconFontStartedAt = Date.now();
-Ionicons.loadFont()
-  .then(() => {
-    if (__DEV__) {
-      console.log(`icon font loaded after ${Date.now() - iconFontStartedAt}ms`);
-    }
-  })
-  .catch((e: unknown) => {
-    if (__DEV__) console.warn("icon font failed to preload", e);
-  });
+function preloadIconFont(label: string, load: () => Promise<void>) {
+  const startedAt = Date.now();
+  load()
+    .then(() => {
+      if (__DEV__) {
+        console.log(`icon font loaded: ${label} after ${Date.now() - startedAt}ms`);
+      }
+    })
+    .catch((e: unknown) => {
+      if (__DEV__) console.warn(`icon font failed to preload: ${label}`, e);
+    });
+}
+
+preloadIconFont("Ionicons", () => Ionicons.loadFont());
+preloadIconFont("MaterialCommunityIcons", () =>
+  MaterialCommunityIcons.loadFont(),
+);
 
 /*
  * The root Stack holds one screen: the (tabs) group. Every screen inside it

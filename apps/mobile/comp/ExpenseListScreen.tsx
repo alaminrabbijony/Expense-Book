@@ -3,12 +3,13 @@ import CategorySheet, { type CategoryChoice } from "@/comp/CategorySheet";
 import ExpenseForm from "@/comp/ExpenseForm";
 import IconPicker from "@/comp/IconPicker";
 import {
+  CategoryGlyph,
   iconFor,
   iconForRow,
   iconsSignature,
   PLACEHOLDER_SHADE,
   shadeForCategory,
-  type IoniconName,
+  type IconFamily,
 } from "@/comp/categoryIcon";
 import { onAddSheetRequested, requestAddSheet } from "@/comp/addSheet";
 import { expenseVersion, onCategoriesChanged, onExpensesChanged } from "@/db/changes";
@@ -684,6 +685,7 @@ const iosPressed = (pressed: boolean) =>
  */
 const ExpenseRow = memo(function ExpenseRow({
   expense,
+  iconFamily,
   iconName,
   iconColor,
   iconTint,
@@ -697,13 +699,16 @@ const ExpenseRow = memo(function ExpenseRow({
   onOpen,
 }: {
   expense: Expense;
-  /* Already checked against the font by the caller, so this component never
-   * has to think about a name the font does not have. A plain string, like
-   * todayStart and clock24, so memo can compare it with Object.is. */
-  iconName: IoniconName;
-  /* Two plain strings rather than one object. memo compares with Object.is, so
-   * an object built in the parent would be a new value on every render and the
-   * row would never skip one. */
+  /* Which font the glyph belongs to. Two are in use now: Ionicons, and
+   * MaterialCommunityIcons for everything Ionicons has no picture of. */
+  iconFamily: IconFamily;
+  /* Already checked against its font by the caller, so this component never
+   * has to think about a name no font has. A plain string, like todayStart
+   * and clock24, so memo can compare it with Object.is. */
+  iconName: string;
+  /* FOUR plain strings rather than one object. memo compares with Object.is,
+   * so an object built in the parent would be a new value on every render and
+   * the row would never skip one. */
   iconColor: string;
   iconTint: string;
   leaving: boolean;
@@ -744,7 +749,12 @@ const ExpenseRow = memo(function ExpenseRow({
   const cardBody = (
     <>
       <View style={[styles.iconCircle, { backgroundColor: iconTint }]}>
-        <Ionicons name={iconName} size={20} color={iconColor} />
+        <CategoryGlyph
+          family={iconFamily}
+          name={iconName}
+          size={20}
+          color={iconColor}
+        />
       </View>
       <View style={styles.cardText}>
         <Text style={styles.rowTitle} numberOfLines={1}>
@@ -2589,7 +2599,8 @@ export default function ExpenseListScreen({
                 ]}
                 onPress={() => setPickerOpen(true)}
               >
-                <Ionicons
+                <CategoryGlyph
+                  family={heroIcon.family}
                   name={heroIcon.name}
                   size={62}
                   color={heroIcon.color}
@@ -2613,7 +2624,8 @@ export default function ExpenseListScreen({
               <View
                 style={[styles.heroCircle, { backgroundColor: heroIcon.tint }]}
               >
-                <Ionicons
+                <CategoryGlyph
+                  family={heroIcon.family}
                   name={heroIcon.name}
                   /* Half the circle, the same ratio every list row uses:
                    * a 20 glyph in a 40 circle. */
@@ -2936,6 +2948,7 @@ export default function ExpenseListScreen({
               return (
                 <ExpenseRow
                   expense={e}
+                  iconFamily={icon.family}
                   iconName={icon.name}
                   iconColor={icon.color}
                   iconTint={icon.tint}

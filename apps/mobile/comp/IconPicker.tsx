@@ -1,5 +1,10 @@
 import BottomSheet from "@/comp/BottomSheet";
-import Ionicons from "@expo/vector-icons/Ionicons";
+import {
+  ALL_ICON_VALUES,
+  CategoryGlyph,
+  DEFAULT_CATEGORY_ICON,
+  parseIcon,
+} from "@/comp/categoryIcon";
 import { memo, useMemo, useState } from "react";
 import {
   FlatList,
@@ -12,29 +17,32 @@ import {
 } from "react-native";
 
 /*
- * The icon catalog: every glyph the installed Ionicons font has, in a sheet
- * with a search box.
+ * The icon catalog: every glyph in both installed fonts, in a sheet with a
+ * search box.
  *
- * Read ONCE at module load, from the font itself. There is no hand-written
- * list anywhere, so this cannot drift out of date when the package moves, and
- * a name that reaches the database is a name the font can definitely draw.
+ * 1,357 Ionicons + 7,448 MaterialCommunityIcons = 8,805. Read at module
+ * load from the fonts themselves, in comp/categoryIcon.tsx — there is no
+ * hand-written list anywhere, so this cannot drift out of date when the
+ * package moves, and a value that reaches the database is one a font can
+ * definitely draw.
  *
- * getRawGlyphMap is the typed way to ask. The font also has hasIcon(), which
- * exists in the JavaScript and is missing from the published typings.
+ * Each entry holds the value that gets STORED and the bare glyph name that
+ * gets SEARCHED, worked out once here rather than on every keystroke:
  *
- * 1,357 names at 15.1.1 [V, read from the package's own glyph map].
- * Sorted, so base and -outline land next to each other ("book",
- * "book-outline", "book-sharp") and the order never changes between opens.
+ *   { value: "mci:rice",           name: "rice" }
+ *   { value: "fast-food-outline",  name: "fast-food-outline" }
+ *
+ * Searching has to use the bare name. Against the stored value, typing "m"
+ * would match every MaterialCommunityIcons glyph at once, because all 7,448
+ * of them start with "mci:".
  */
-const GLYPHS = Ionicons.getRawGlyphMap();
-type IoniconName = keyof typeof GLYPHS;
-const ICON_NAMES = (Object.keys(GLYPHS) as IoniconName[]).sort();
+const CHOICES = ALL_ICON_VALUES.map((value) => ({
+  value,
+  name: parseIcon(value).name,
+}));
 
 /* YOURS TO RESTYLE: how many icons fit across. */
 const COLUMNS = 6;
-
-/* The icon a category with none shows, the same one the cards fall back to. */
-const NO_ICON = "receipt-outline" as const;
 
 /*
  * Tap feedback, the app's rule: Android ripples, iOS dims. The sheet behind
@@ -44,14 +52,17 @@ const RIPPLE = { color: "rgba(255,255,255,0.22)" };
 
 type Props = {
   visible: boolean;
-  /* The name picked so far, or null for "no icon". Drawn selected in the
+  /* The value picked so far, or null for "no icon". Drawn selected in the
    * grid, so reopening the sheet shows where you already are. */
   selected: string | null;
   /* The category's own colour pair, so an icon in this sheet looks exactly
    * the way it will look on the card once it is chosen. */
   color: string;
   tint: string;
-  onPick: (name: string | null) => void;
+  /* Hands back the value to STORE — "mci:rice", not "rice". A bare
+   * MaterialCommunityIcons name would be read back as an Ionicons name,
+   * find no glyph, and silently draw the grey receipt. */
+  onPick: (value: string | null) => void;
   onClose: () => void;
 };
 
@@ -61,24 +72,28 @@ type Props = {
  * memo for the reason every list in this project uses it: a FlatList hands
  * each cell a brand-new renderItem wrapper every time it renders, and typing
  * in the search box renders it on every keystroke. With memo, a cell whose
- * four props are unchanged does not run again.
+ * props are unchanged does not run again.
  *
- * All four props are plain strings or booleans, which is what lets memo's
+ * Every prop is a plain string or boolean, which is what lets memo's
  * Object.is comparison work. An object built in the parent would be a new
  * value every render and memo would never skip anything.
  */
 const IconCell = memo(function IconCell({
+  value,
+  family,
   name,
   picked,
   color,
   tint,
   onPick,
 }: {
-  name: IoniconName;
+  value: string;
+  family: "ion" | "mci";
+  name: string;
   picked: boolean;
   color: string;
   tint: string;
-  onPick: (name: string) => void;
+  onPick: (value: string) => void;
 }) {
   return (
     <Pressable
@@ -90,12 +105,18 @@ const IconCell = memo(function IconCell({
         picked && { backgroundColor: tint },
         Platform.OS === "ios" && pressed ? styles.iosPressed : null,
       ]}
-      onPress={() => onPick(name)}
+      /* The VALUE, with its prefix, not the display name. */
+      onPress={() => onPick(value)}
     >
       {/* The picked one is drawn in the category's own colour, the rest in
           plain white. So the sheet shows what the choice will look like
           rather than only which cell is ticked. */}
-      <Ionicons name={name} size={26} color={picked ? color : "#ECEDEE"} />
+      <CategoryGlyph
+        family={family}
+        name={name}
+        size={26}
+        color={picked ? color : "#ECEDEE"}
+      />
     </Pressable>
   );
 });
@@ -118,12 +139,12 @@ export default function IconPicker({
    * render would make it rebuild its cells for nothing.
    *
    * Every glyph name is already lower case, so only the query is folded.
-   * A plain `includes`, not a prefix match: "arrow" should find
-   * "chevron-back" nothing, but "back" should find "arrow-back".
+   * A plain `includes`, not a prefix match: "back" should find
+   * "arrow-back".
    */
   const shown = useMemo(() => {
     const q = query.trim().toLowerCase();
-    return q.length === 0 ? ICON_NAMES : ICON_NAMES.filter((n) => n.includes(q));
+    return q.length === 0 ? CHOICES : CHOICES.filter((c) => c.name.includes(q));
   }, [query]);
 
   return (
@@ -132,7 +153,9 @@ export default function IconPicker({
         style={styles.search}
         value={query}
         onChangeText={setQuery}
-        placeholder={`Search ${ICON_NAMES.length} icons`}
+        /* The count comes from the array, so it can never say a number the
+         * fonts disagree with. */
+        placeholder={`Search ${CHOICES.length} icons`}
         placeholderTextColor="#8E8E93"
         autoCorrect={false}
         autoCapitalize="none"
@@ -140,7 +163,7 @@ export default function IconPicker({
       />
 
       {/* Clearing the icon is not an icon, so it is not a cell in the grid.
-          A cell would need a fake name in a typed list of real ones. */}
+          A cell would need a fake value in a list of real ones. */}
       <Pressable
         accessibilityRole="button"
         accessibilityLabel="No icon"
@@ -153,7 +176,14 @@ export default function IconPicker({
         onPress={() => onPick(null)}
       >
         <View style={styles.noneCircle}>
-          <Ionicons name={NO_ICON} size={20} color="#ECEDEE" />
+          {/* The same placeholder every card falls back to, from the one
+              place that decides it. */}
+          <CategoryGlyph
+            family={DEFAULT_CATEGORY_ICON.family}
+            name={DEFAULT_CATEGORY_ICON.name}
+            size={20}
+            color="#ECEDEE"
+          />
         </View>
         <Text style={styles.noneText}>No icon</Text>
       </Pressable>
@@ -171,25 +201,29 @@ export default function IconPicker({
         and under the default the first tap on any icon would only close the
         keyboard. The icon would never receive it.
 
-        1,357 cells, and FlatList only builds the ones near the screen.
+        8,805 cells, and FlatList only builds the ones near the screen. It is
+        6.5x what this grid used to hold, so the search box has stopped being
+        a convenience.
       */}
       <FlatList
         style={styles.grid}
         data={shown}
-        keyExtractor={(name) => name}
+        keyExtractor={(c) => c.value}
         numColumns={COLUMNS}
         keyboardShouldPersistTaps="handled"
         columnWrapperStyle={styles.gridRow}
-        /* The picked name changes which cell draws itself selected, and it is
-         * not part of `data`. Without this, the old cell would stay lit. */
+        /* The picked value changes which cell draws itself selected, and it
+         * is not part of `data`. Without this, the old cell would stay lit. */
         extraData={`${selected}|${color}`}
         ListEmptyComponent={
           <Text style={styles.empty}>No icon called “{query.trim()}”.</Text>
         }
         renderItem={({ item }) => (
           <IconCell
-            name={item}
-            picked={item === selected}
+            value={item.value}
+            family={parseIcon(item.value).family}
+            name={item.name}
+            picked={item.value === selected}
             color={color}
             tint={tint}
             onPick={onPick}

@@ -1,5 +1,5 @@
 import Ionicons from "@expo/vector-icons/Ionicons";
-import { iconFor, iconForRow } from "@/comp/categoryIcon";
+import { CategoryGlyph, iconFor, iconForRow } from "@/comp/categoryIcon";
 import type { CategoryIcons } from "@/db/expenses";
 import { Platform, Pressable, StyleSheet, Text, View } from "react-native";
 
@@ -19,9 +19,14 @@ export type ManageItem = { id: string; name: string };
 type Props = {
   items: ManageItem[];
   /*
-   * Which categories have an icon, as a map of id to glyph name. A category
-   * that has not been given one is simply absent, and iconForRow falls
-   * through to the grey placeholder.
+   * Which categories have an icon, as a map of id to the STORED value —
+   * "fast-food-outline" for an Ionicons glyph, "mci:rice" for a
+   * MaterialCommunityIcons one. A category that has not been given one is
+   * simply absent, and iconForRow falls through to the grey placeholder.
+   *
+   * Nothing in this file reads that prefix. iconForRow hands back a family
+   * and CategoryGlyph draws it, so only comp/categoryIcon.tsx ever names a
+   * font.
    *
    * Passed in rather than read here, for the same reason the two ids below
    * are: this component never reaches into db/. The screen owns the read, so
@@ -107,10 +112,10 @@ export default function CategoryManageList({
          * list and Home can never disagree about a category's glyph, its
          * colour or its fallback.
          *
-         * While editing, the icon shown is the DRAFT — iconFor takes a name
-         * directly, which is exactly the case it was split off for: a value
-         * only being considered gets the same colour and the same fallback
-         * as a saved one.
+         * While editing, the icon shown is the DRAFT — iconFor takes a
+         * stored value directly, which is exactly the case it was split off
+         * for: a value only being considered gets the same font, colour and
+         * fallback as a saved one.
          */
         const icon = editing
           ? iconFor(item.id, draftIcon ?? undefined)
@@ -118,15 +123,27 @@ export default function CategoryManageList({
 
         const circleBody = (
           <>
-            <Ionicons name={icon.name} size={20} color={icon.color} />
+            {/* CategoryGlyph, not Ionicons. The glyph may belong to either
+                installed font, and icon.family is what says which. This file
+                never has to know. */}
+            <CategoryGlyph
+              family={icon.family}
+              name={icon.name}
+              size={20}
+              color={icon.color}
+            />
 
             {/* The "this can be changed" mark, on only while this row is
                 being edited.
 
-                IN THE CORNER, NOT OVER THE MIDDLE, and the whole reason is
+                Drawn with Ionicons directly, on purpose: it is app
+                furniture, like the ⋯, the ✕ and the ✓, not a category's own
+                icon. Only a category's icon goes through CategoryGlyph.
+
+                IN THE CORNER, NOT OVER THE MIDDLE, and the reason is
                 arithmetic. The glyph is 20 in a 40 circle, so it occupies 10
-                to 30 on both axes; a centred 26 disc occupied 7 to 33 and hid
-                every pixel of it. An 18 badge in the bottom-right corner
+                to 30 on both axes; a centred 26 disc occupied 7 to 33 and
+                hid every pixel of it. An 18 badge in the bottom-right corner
                 hides 16% of the glyph's area.
 
                 There is no veil over the circle either. A veil was only ever
@@ -151,8 +168,8 @@ export default function CategoryManageList({
             key={item.id}
             style={[styles.row, dimmed && styles.rowDimmed]}
             /* y is this row's top inside the scrolling content, which is
-             * exactly what scrollTo takes. It fires on first layout and
-             * again whenever the row moves. */
+             * exactly what the screen's scrollTo takes. It fires on first
+             * layout and again whenever the row moves. */
             onLayout={(e) => onRowLayout(item.id, e.nativeEvent.layout.y)}
           >
             {/* OUTSIDE the name's Pressable, never inside it. Session 16's
