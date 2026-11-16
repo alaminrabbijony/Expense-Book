@@ -12,6 +12,14 @@ import {
   type IconFamily,
 } from "@/comp/categoryIcon";
 import { onAddSheetRequested, requestAddSheet } from "@/comp/addSheet";
+import {
+  DARK,
+  LIGHT,
+  PALETTES,
+  schemeOf,
+  type Palette,
+  type Scheme,
+} from "@/theme/palette";
 import { expenseVersion, onCategoriesChanged, onExpensesChanged } from "@/db/changes";
 import {
   deleteExpense,
@@ -65,7 +73,6 @@ import {
   timeCategoryReads,
   timeFilteredPages,
   timePages,
-  holdPeriod
 } from "@/db/devTools";
 */
 import { asMinor, DEFAULT_CURRENCY, formatMoney, type Minor } from "@et/shared";
@@ -85,10 +92,10 @@ import {
   BackHandler,
   Platform,
   Pressable,
-  StatusBar,
   StyleSheet,
   Text,
   TextInput,
+  useColorScheme,
   View,
 } from "react-native";
 import ReanimatedSwipeable, {
@@ -605,14 +612,6 @@ const LIST_MOVE = LinearTransition.duration(200);
 const SAFE_EDGES = ["top", "left", "right"] as const;
 
 /*
- * The title page pads ALL FOUR edges. It opens over the tabs, so there is
- * no tab bar under it, and the bottom inset — the system navigation bar —
- * is its own to pad. With SAFE_EDGES, the last row of a long list would sit
- * under the navigation bar.
- */
-const SAFE_EDGES_ALL = ["top", "left", "right", "bottom"] as const;
-
-/*
  * Tap feedback. Android shows a ripple; iOS has no ripple, so it dims
  * instead. Only one of the two ever runs on a platform — both on Android
  * would be double feedback.
@@ -620,25 +619,37 @@ const SAFE_EDGES_ALL = ["top", "left", "right", "bottom"] as const;
  * android_ripple is ignored on iOS, and the pressed opacity is switched off
  * on Android below, so each control can simply be given both.
  */
-const RIPPLE = { color: "rgba(255,255,255,0.22)" };
-const RIPPLE_ROUND = { ...RIPPLE, borderless: true, radius: 24 };
+const makeRipples = (c: Palette) => ({
+  /* On the page, and on a list card. Both take the same value today, which
+   * is why this is one entry and not two. */
+  onPage: { color: c.rippleOnPage },
+  /* On the top card, which is the one surface that inverts between modes —
+   * so its ripple inverts too, and it cannot borrow onPage's. */
+  onHero: { color: c.rippleOnHero },
+  /* Undo and the empty state's Show all: round, so the ripple has to be
+   * told it is round or Android draws a square one. */
+  round: { color: c.rippleOnPage, borderless: true, radius: 24 },
+});
 
 /*
- * The same feedback for controls that sit ON a white card. A white ripple
- * on a white card is invisible, so the tap would look like it did nothing.
- * The rule: pick the ripple by the colour of what is directly behind the
- * control, not by what the control is.
+ * Both sets, built once at module load.
+ *
+ * There are exactly two palettes and they are written in the source, so
+ * nothing is computed at runtime and nothing can go stale. Same shape as
+ * STYLES below, and as TAB_OPTIONS in app/(tabs)/_layout.tsx.
  */
-const RIPPLE_ON_LIGHT = { color: "rgba(0,0,0,0.12)" };
+const RIPPLES: Record<Scheme, ReturnType<typeof makeRipples>> = {
+  dark: makeRipples(DARK),
+  light: makeRipples(LIGHT),
+};
 
 /*
- * Text and icons on the white top card. YOURS TO RESTYLE. Icons take their
- * colour as a prop rather than from a style, so the icon calls read it from
- * here.
+ * The iOS press dim. The one style in this file with no colour in it, so it
+ * is built once rather than once per palette.
  */
-const INK = "#1C1C1E";
+const PRESS = StyleSheet.create({ ios: { opacity: 0.6 } });
 const iosPressed = (pressed: boolean) =>
-  Platform.OS === "ios" && pressed ? styles.iosPressed : null;
+  Platform.OS === "ios" && pressed ? PRESS.ios : null;
 
 /*
  * One expense row, swipeable.
@@ -693,6 +704,7 @@ const ExpenseRow = memo(function ExpenseRow({
   restoring,
   todayStart,
   clock24,
+  scheme,
   onEdit,
   onDelete,
   onWillOpen,
@@ -715,12 +727,34 @@ const ExpenseRow = memo(function ExpenseRow({
   restoring: boolean;
   todayStart: number;
   clock24: boolean;
+  /*
+   * WHY THE THEME IS A PROP AND NOT A HOOK CALL IN HERE.
+   *
+   * This row is memo'd. A palette switch changes no prop it can see — the
+   * colours live in a StyleSheet at module scope — so without this the page
+   * would turn light and every row would stay dark, with nothing thrown and
+   * nothing logged.
+   *
+   * A plain STRING, like todayStart and clock24, because memo compares with
+   * Object.is. One object carrying the palette would be a new value on every
+   * render and no row would ever skip one.
+   *
+   * It also has to be in the list's extraData, or FlatList will not re-run
+   * renderItem for rows already on screen. Both halves, or neither works.
+   */
+  scheme: Scheme;
   onEdit: (e: Expense, methods: SwipeableMethods | null) => void;
   onDelete: (e: Expense) => void;
   onWillOpen: (methods: SwipeableMethods | null) => void;
   onOpen: ((e: Expense) => void) | null;
 }) {
   const swipeRef = useRef<SwipeableMethods | null>(null);
+
+  /* One index each, off two records built at module load. Nothing is
+   * computed per row. */
+  const c = PALETTES[scheme];
+  const styles = STYLES[scheme];
+  const ripple = RIPPLES[scheme];
 
   /*
    * Dev-only render count for logListRender.
@@ -813,7 +847,7 @@ const ExpenseRow = memo(function ExpenseRow({
             <Pressable
               accessibilityRole="button"
               accessibilityLabel="Edit expense"
-              android_ripple={RIPPLE}
+              android_ripple={ripple.onPage}
               style={({ pressed }) => [
                 styles.rowAction,
                 styles.rowActionEdit,
@@ -825,12 +859,12 @@ const ExpenseRow = memo(function ExpenseRow({
               // can still reach this row by then.
               onPress={() => onEdit(expense, swipeRef.current)}
             >
-              <Ionicons name="pencil" size={22} color="#FFFFFF" />
+              <Ionicons name="pencil" size={22} color={c.onDanger} />
             </Pressable>
             <Pressable
               accessibilityRole="button"
               accessibilityLabel="Delete expense"
-              android_ripple={RIPPLE}
+              android_ripple={ripple.onPage}
               style={({ pressed }) => [
                 styles.rowAction,
                 styles.rowActionDelete,
@@ -840,7 +874,7 @@ const ExpenseRow = memo(function ExpenseRow({
               // nothing will ever need to close it.
               onPress={() => onDelete(expense)}
             >
-              <Ionicons name="trash" size={22} color="#FFFFFF" />
+              <Ionicons name="trash" size={22} color={c.onDanger} />
             </Pressable>
           </View>
         )}
@@ -870,10 +904,33 @@ const ExpenseRow = memo(function ExpenseRow({
             every card there is the same title, so a tap has nowhere to go,
             and a card that ripples would promise something. */}
         {onOpen ? (
+          /*
+           * NO android_ripple ON THIS CARD, and that is a decision, not an
+           * omission. Session 35 proved the cause of a bug Session 34 only
+           * guessed at.
+           *
+           * android_ripple arrives on Android as nativeBackgroundAndroid, and
+           * React Native answers it by rebuilding the view's WHOLE background
+           * as one composite drawable with the ripple as a layer inside it
+           * (ReactViewManager.setNativeBackground -> BackgroundStyleApplicator
+           * .setFeedbackUnderlay, 0.81.5). The background colour stops being a
+           * property the view can update and becomes part of a drawable that
+           * was assembled once. So on a live theme switch every card kept its
+           * old colour — the log proved React was sending the right one.
+           *
+           * The alternative was key={scheme}, which works by remounting. On
+           * the six small controls below that is free. Here it is up to FIFTY
+           * views per toggle, so the ripple goes instead. The card's tap opens
+           * the title page, which is feedback enough; iOS keeps its opacity
+           * dim, which was never an android_ripple in the first place.
+           *
+           * The two swipe blocks DO keep theirs: swipeEdit and swipeDelete
+           * hold the same value in both modes, so a stale drawable there is
+           * stale with the right colour.
+           */
           <Pressable
             accessibilityRole="button"
             accessibilityLabel={`Open ${expense.title}`}
-            android_ripple={RIPPLE}
             style={({ pressed }) => [styles.card, iosPressed(pressed)]}
             onPress={() => onOpen(expense)}
           >
@@ -999,6 +1056,22 @@ export default function ExpenseListScreen({
    * is not shows Home's category filter instead. Both are props, so neither
    * changes for the life of a copy.
    */
+  /*
+   * The phone's light/dark setting, read ONCE here and handed down.
+   *
+   * useColorScheme() re-renders the component that calls it. This screen is
+   * already the component that re-renders, so reading it here costs nothing
+   * extra — and a second call inside ExpenseRow would make each row decide
+   * for itself, which is how two rows end up disagreeing mid-render.
+   *
+   * schemeOf folds null and undefined into "dark", which is what the app has
+   * always been.
+   */
+  const scheme = schemeOf(useColorScheme());
+  const c = PALETTES[scheme];
+  const styles = STYLES[scheme];
+  const ripple = RIPPLES[scheme];
+
   const isTitle = titleOnly !== undefined;
   const isCategory = categoryOnly !== undefined;
   const hasPeriodMenu = isTitle || isCategory;
@@ -2439,18 +2512,29 @@ export default function ExpenseListScreen({
   /*
    * The big circle on the category page's card.
    *
-   * iconForRow, the SAME function every list row uses, so the 72 circle on the
-   * card and the 40 circles below it can never disagree about this category's
-   * icon or its colour. A category with no icon chosen gets the grey circle
+   * iconForRow, the SAME function every list row uses, so the 124 circle on
+   * the card and the 40 circles below it can never disagree about this
+   * category's icon or its colour. A category with no icon chosen gets the grey circle
    * and the receipt here too, so unset looks unset at both sizes.
+   */
+  /*
+   * These five places took the literal "dark" from Session 34 until now.
+   *
+   * comp/categoryIcon.tsx needs a scheme because the twelve icon colours
+   * have a light set as well, and that argument was made REQUIRED rather
+   * than defaulted precisely so the compiler would list every caller
+   * instead of letting a forgotten one quietly keep drawing dark.
+   *
+   * They now pass the real thing. The four below are the category page's own
+   * 124 circle and its picker; the fifth is in renderItem, once per row.
    */
   const heroIcon = isCategory
     ? /* While editing, the circle shows what has been PICKED, not what is
        * stored — so the sheet closing changes the card at once and ✕ puts the
        * old one back without anything being written. */
       renaming
-      ? iconFor(categoryOnly, iconDraft ?? undefined)
-      : iconForRow(categoryOnly, icons.map)
+      ? iconFor(categoryOnly, iconDraft ?? undefined, scheme)
+      : iconForRow(categoryOnly, icons.map, scheme)
     : null;
 
   /*
@@ -2468,8 +2552,8 @@ export default function ExpenseListScreen({
 
   /* The colour the sheet draws a picked icon in: this category's own. */
   const pickerShade = isCategory
-    ? shadeForCategory(categoryOnly)
-    : PLACEHOLDER_SHADE;
+    ? shadeForCategory(categoryOnly, scheme)
+    : PLACEHOLDER_SHADE[scheme];
 
   /*
    * The card's two lines of words, worked out here so the JSX stays plain.
@@ -2497,19 +2581,19 @@ export default function ExpenseListScreen({
 
   return (
     /*
-     * The title page pads all four edges; the tab screens pad three. See
-     * SAFE_EDGES and SAFE_EDGES_ALL.
+     * Three edges on every screen in this file, the title page included.
+     *
+     * It used to pad four, on a comment saying the title page "opens over
+     * the tabs". That stopped being true at Session 29, when the page moved
+     * INSIDE the tab's own stack — so the tab bar is under it and already
+     * pads the bottom. Four edges padded it twice.
      */
-    <SafeAreaView
-      style={styles.screen}
-      edges={screen === "title" ? SAFE_EDGES_ALL : SAFE_EDGES}
-    >
+    <SafeAreaView style={styles.screen} edges={SAFE_EDGES}>
       {/* With the header gone, the clock and battery sit straight on the
           black page. The system draws them dark by default, which would be
           invisible here, so this asks for light ones. On Android below
           API 31 React Native sets the older SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
           from 31 up it uses WindowInsetsController. Both are covered. */}
-      <StatusBar barStyle="light-content" />
 
       {/* The title page's bar: only ‹, on the black above the card. The
           title itself is on the card. Back pops this page off the root
@@ -2558,12 +2642,15 @@ export default function ExpenseListScreen({
               <View style={styles.heroIconButton} />
             ) : (
             <Pressable
+              /* Rebuilt on a theme switch. Its circle is heroIconBg, which
+                 inverts, and it carries a ripple — see the card above. */
+              key={scheme}
               ref={dotsRef}
               accessibilityRole="button"
               accessibilityLabel={
                 hasPeriodMenu ? "Choose a period" : "Filter by category"
               }
-              android_ripple={RIPPLE_ON_LIGHT}
+              android_ripple={ripple.onHero}
               style={({ pressed }) => [styles.heroIconButton, iosPressed(pressed)]}
               onPress={
                 hasPeriodMenu
@@ -2575,7 +2662,7 @@ export default function ExpenseListScreen({
               }
               hitSlop={12}
             >
-              <Ionicons name="ellipsis-horizontal" size={20} color={INK} />
+              <Ionicons name="ellipsis-horizontal" size={20} color={c.heroInk} />
             </Pressable>
             )}
           </View>
@@ -2589,9 +2676,12 @@ export default function ExpenseListScreen({
           {heroIcon &&
             (renaming && canPickIcon ? (
               <Pressable
+                /* Its backing is the category's own tint, which has a value
+                   per mode. Rippled, so it needs the remount. */
+                key={scheme}
                 accessibilityRole="button"
                 accessibilityLabel="Choose an icon"
-                android_ripple={RIPPLE_ON_LIGHT}
+                android_ripple={ripple.onHero}
                 style={({ pressed }) => [
                   styles.heroCircle,
                   { backgroundColor: heroIcon.tint },
@@ -2616,7 +2706,7 @@ export default function ExpenseListScreen({
                     the Pressable it sits inside. */}
                 <View style={styles.heroCircleScrim}>
                   <View style={styles.heroCirclePencil}>
-                    <Ionicons name="pencil" size={22} color="#FFFFFF" />
+                    <Ionicons name="pencil" size={22} color={c.onDanger} />
                   </View>
                 </View>
               </Pressable>
@@ -2645,7 +2735,7 @@ export default function ExpenseListScreen({
               value={nameDraft ?? ""}
               onChangeText={setNameDraft}
               placeholder="Category name"
-              placeholderTextColor="#8E8E93"
+              placeholderTextColor={c.heroPlaceholder}
               /* On this emulator autoFocus does NOT raise the keyboard — a
                * tap on the field does. That is the AVD, not this code. */
               autoFocus
@@ -2723,13 +2813,16 @@ export default function ExpenseListScreen({
                way. The undo window ends through this copy's
                onAddSheetRequested listener (the leaving-the-screen effect). */
             <Pressable
+              /* addBg is #000000 in dark and #FFFFFF in light — the widest
+                 swing of any control in this file. Rippled, so: remount. */
+              key={scheme}
               accessibilityRole="button"
               accessibilityLabel="Add expense"
-              android_ripple={RIPPLE}
+              android_ripple={ripple.onPage}
               style={({ pressed }) => [styles.heroAdd, iosPressed(pressed)]}
               onPress={requestAddSheet}
             >
-              <Ionicons name="add" size={30} color="#FFFFFF" />
+              <Ionicons name="add" size={30} color={c.addIcon} />
             </Pressable>
           )}
 
@@ -2747,9 +2840,10 @@ export default function ExpenseListScreen({
               {renaming ? (
                 <>
                   <Pressable
+                    key={scheme}
                     accessibilityRole="button"
                     accessibilityLabel="Cancel renaming"
-                    android_ripple={RIPPLE_ON_LIGHT}
+                    android_ripple={ripple.onHero}
                     style={({ pressed }) => [
                       styles.heroIconButton,
                       iosPressed(pressed),
@@ -2757,12 +2851,13 @@ export default function ExpenseListScreen({
                     onPress={cancelRename}
                     hitSlop={12}
                   >
-                    <Ionicons name="close" size={22} color={INK} />
+                    <Ionicons name="close" size={22} color={c.heroInk} />
                   </Pressable>
                   <Pressable
+                    key={scheme}
                     accessibilityRole="button"
                     accessibilityLabel="Save the name"
-                    android_ripple={RIPPLE_ON_LIGHT}
+                    android_ripple={ripple.onHero}
                     style={({ pressed }) => [
                       styles.heroIconButton,
                       iosPressed(pressed),
@@ -2770,14 +2865,15 @@ export default function ExpenseListScreen({
                     onPress={saveRename}
                     hitSlop={12}
                   >
-                    <Ionicons name="checkmark" size={22} color={INK} />
+                    <Ionicons name="checkmark" size={22} color={c.heroInk} />
                   </Pressable>
                 </>
               ) : (
                 <Pressable
+                  key={scheme}
                   accessibilityRole="button"
                   accessibilityLabel="Rename this category"
-                  android_ripple={RIPPLE_ON_LIGHT}
+                  android_ripple={ripple.onHero}
                   style={({ pressed }) => [
                     styles.heroIconButton,
                     iosPressed(pressed),
@@ -2785,7 +2881,7 @@ export default function ExpenseListScreen({
                   onPress={startRename}
                   hitSlop={12}
                 >
-                  <Ionicons name="pencil" size={20} color={INK} />
+                  <Ionicons name="pencil" size={20} color={c.heroInk} />
                 </Pressable>
               )}
             </View>
@@ -2831,7 +2927,7 @@ export default function ExpenseListScreen({
           <Pressable
             accessibilityRole="button"
             accessibilityLabel={`Undo deleting ${held.title}`}
-            android_ripple={RIPPLE_ROUND}
+            android_ripple={ripple.round}
             style={({ pressed }) => iosPressed(pressed)}
             onPress={undoDelete}
             hitSlop={12}
@@ -2885,7 +2981,7 @@ export default function ExpenseListScreen({
              * the renderItem call and Reanimated's animated wrapper around the
              * cell still run. The list Profiler measures what is left.
              */
-            extraData={`${leavingId}|${restoredId}|${todayStart}|${clock24}|${icons.key}`}
+            extraData={`${leavingId}|${restoredId}|${todayStart}|${clock24}|${icons.key}|${scheme}`}
             /*
              * Different empty screens. An empty app needs "add one"; an
              * empty filter needs the way back out, so only it gets Show all.
@@ -2907,7 +3003,7 @@ export default function ExpenseListScreen({
                 {filter && (
                   <Pressable
                     accessibilityRole="button"
-                    android_ripple={RIPPLE_ROUND}
+                    android_ripple={ripple.round}
                     style={({ pressed }) => [
                       styles.emptyAction,
                       iosPressed(pressed),
@@ -2921,7 +3017,7 @@ export default function ExpenseListScreen({
                 {hasPeriodMenu && period !== "all" && (
                   <Pressable
                     accessibilityRole="button"
-                    android_ripple={RIPPLE_ROUND}
+                    android_ripple={ripple.round}
                     style={({ pressed }) => [
                       styles.emptyAction,
                       iosPressed(pressed),
@@ -2944,7 +3040,7 @@ export default function ExpenseListScreen({
               ) : null
             }
             renderItem={({ item: e }) => {
-              const icon = iconForRow(e.categoryId, icons.map);
+              const icon = iconForRow(e.categoryId, icons.map, scheme);
               return (
                 <ExpenseRow
                   expense={e}
@@ -2955,6 +3051,10 @@ export default function ExpenseListScreen({
                   leaving={e.id === leavingId}
                   todayStart={todayStart}
                   clock24={clock24}
+                  /* The theme, as a plain string. See the prop's comment on
+                     ExpenseRow: without this AND the extraData entry above,
+                     the page turns light and every row stays dark. */
+                  scheme={scheme}
                   restoring={e.id === restoredId}
                   onEdit={openEdit}
                   onDelete={deleteRow}
@@ -2996,8 +3096,13 @@ export default function ExpenseListScreen({
 
           1. Delete the two lines that open and close the block below.
           2. Do the same around the devTools import at the top of the file.
-          3. Run npm run typecheck. Commented-out code is never typechecked,
+          3. Uncomment const devStyles at the very bottom of this file. It
+             is commented out because nothing live reads it, and an unused
+             local fails the typecheck.
+          4. Run npm run typecheck. Commented-out code is never typechecked,
              so anything renamed in db/devTools.ts since only shows up then.
+             That is exactly how `holdPeriod` sat in the import above for
+             four sessions: it was never a compile error while commented.
 
         Nothing floats over the list any more, so the dev row needs no room
         made for it. It sits under the list and wraps to several lines.
@@ -3011,9 +3116,9 @@ export default function ExpenseListScreen({
       */}
       {/*
       {__DEV__ && (
-        <View style={styles.devRow}>
+        <View style={devStyles.devRow}>
           <Pressable
-            style={styles.devButton}
+            style={devStyles.devButton}
             onPress={() => {
               const t0 = Date.now();
               seedFakeExpenses(50000);
@@ -3021,75 +3126,75 @@ export default function ExpenseListScreen({
               reload();
             }}
           >
-            <Text style={styles.devButtonText}>Seed 50k</Text>
+            <Text style={devStyles.devButtonText}>Seed 50k</Text>
           </Pressable>
           <Pressable
-            style={styles.devButton}
+            style={devStyles.devButton}
             onPress={() => {
               clearSeedExpenses();
               reload();
             }}
           >
-            <Text style={styles.devButtonText}>Clear seed</Text>
+            <Text style={devStyles.devButtonText}>Clear seed</Text>
           </Pressable>
-          <Pressable style={styles.devButton} onPress={explainListPage}>
-            <Text style={styles.devButtonText}>Explain plan</Text>
+          <Pressable style={devStyles.devButton} onPress={explainListPage}>
+            <Text style={devStyles.devButtonText}>Explain plan</Text>
           </Pressable>
-          <Pressable style={styles.devButton} onPress={timePages}>
-            <Text style={styles.devButtonText}>Time pages</Text>
+          <Pressable style={devStyles.devButton} onPress={timePages}>
+            <Text style={devStyles.devButtonText}>Time pages</Text>
           </Pressable>
-          <Pressable style={styles.devButton} onPress={createListIndex}>
-            <Text style={styles.devButtonText}>Add index</Text>
+          <Pressable style={devStyles.devButton} onPress={createListIndex}>
+            <Text style={devStyles.devButtonText}>Add index</Text>
           </Pressable>
-          <Pressable style={styles.devButton} onPress={dropListIndex}>
-            <Text style={styles.devButtonText}>Drop index</Text>
+          <Pressable style={devStyles.devButton} onPress={dropListIndex}>
+            <Text style={devStyles.devButtonText}>Drop index</Text>
           </Pressable>
-          <Pressable style={styles.devButton} onPress={readUserVersion}>
-            <Text style={styles.devButtonText}>Version</Text>
+          <Pressable style={devStyles.devButton} onPress={readUserVersion}>
+            <Text style={devStyles.devButtonText}>Version</Text>
           </Pressable>
-          <Pressable style={styles.devButton} onPress={probeForeignKeys}>
-            <Text style={styles.devButtonText}>Probe FKs</Text>
+          <Pressable style={devStyles.devButton} onPress={probeForeignKeys}>
+            <Text style={devStyles.devButtonText}>Probe FKs</Text>
           </Pressable>
-          <Pressable style={styles.devButton} onPress={countRowSources}>
-            <Text style={styles.devButtonText}>Count rows</Text>
+          <Pressable style={devStyles.devButton} onPress={countRowSources}>
+            <Text style={devStyles.devButtonText}>Count rows</Text>
           </Pressable>
-          <Pressable style={styles.devButton} onPress={listIndexes}>
-            <Text style={styles.devButtonText}>listIndexes</Text>
+          <Pressable style={devStyles.devButton} onPress={listIndexes}>
+            <Text style={devStyles.devButtonText}>listIndexes</Text>
           </Pressable>
-          <Pressable style={styles.devButton} onPress={explainFilteredPlans}>
-            <Text style={styles.devButtonText}>explainFilteredPlans</Text>
+          <Pressable style={devStyles.devButton} onPress={explainFilteredPlans}>
+            <Text style={devStyles.devButtonText}>explainFilteredPlans</Text>
           </Pressable>
-          <Pressable style={styles.devButton} onPress={timeFilteredPages}>
-            <Text style={styles.devButtonText}>timeFilteredPages</Text>
+          <Pressable style={devStyles.devButton} onPress={timeFilteredPages}>
+            <Text style={devStyles.devButtonText}>timeFilteredPages</Text>
           </Pressable>
-          <Pressable style={styles.devButton} onPress={createCategoryIndex}>
-            <Text style={styles.devButtonText}>createCategoryIndex</Text>
+          <Pressable style={devStyles.devButton} onPress={createCategoryIndex}>
+            <Text style={devStyles.devButtonText}>createCategoryIndex</Text>
           </Pressable>
           <Pressable
-            style={styles.devButton}
+            style={devStyles.devButton}
             onPress={createCategoryCompositeIndex}
           >
-            <Text style={styles.devButtonText}>
+            <Text style={devStyles.devButtonText}>
               createCategoryCompositeIndex
             </Text>
           </Pressable>
-          <Pressable style={styles.devButton} onPress={dropCategoryIndexes}>
-            <Text style={styles.devButtonText}>dropCategoryIndexes</Text>
+          <Pressable style={devStyles.devButton} onPress={dropCategoryIndexes}>
+            <Text style={devStyles.devButtonText}>dropCategoryIndexes</Text>
           </Pressable>
-          <Pressable style={styles.devButton} onPress={probeCategoryFkOnInsert}>
-            <Text style={styles.devButtonText}>FK on insert</Text>
+          <Pressable style={devStyles.devButton} onPress={probeCategoryFkOnInsert}>
+            <Text style={devStyles.devButtonText}>FK on insert</Text>
           </Pressable>
-          <Pressable style={styles.devButton} onPress={timeCategoryReads}>
-            <Text style={styles.devButtonText}>Time category reads</Text>
+          <Pressable style={devStyles.devButton} onPress={timeCategoryReads}>
+            <Text style={devStyles.devButtonText}>Time category reads</Text>
           </Pressable>
-          <Pressable style={styles.devButton} onPress={probeCategoryWrites}>
-            <Text style={styles.devButtonText}>probeCategoryWrites</Text>
+          <Pressable style={devStyles.devButton} onPress={probeCategoryWrites}>
+            <Text style={devStyles.devButtonText}>probeCategoryWrites</Text>
           </Pressable>
-          <Pressable style={styles.devButton} onPress={probeExpenseWrites}>
-            <Text style={styles.devButtonText}>probeExpenseWrites</Text>
+          <Pressable style={devStyles.devButton} onPress={probeExpenseWrites}>
+            <Text style={devStyles.devButtonText}>probeExpenseWrites</Text>
           </Pressable>
-          <Pressable style={styles.devButton} onPress={probeExpenseDelete}>
-            <Text style={styles.devButtonText}>probeExpenseDelete</Text>
+          <Pressable style={devStyles.devButton} onPress={probeExpenseDelete}>
+            <Text style={devStyles.devButtonText}>probeExpenseDelete</Text>
           </Pressable>
         </View>
       )}
@@ -3195,9 +3300,14 @@ export default function ExpenseListScreen({
             >
               {PERIODS.map((p, i) => (
                 <Pressable
-                  key={p.key}
+                  /* The scheme is in the key because menuItemDivider sets a
+                     borderTopColor, and a BORDER colour lives in the same
+                     composite drawable the ripple rebuilds — not just a
+                     background. The menu is only three rows and only alive
+                     while it is open, so this is the cheapest of the seven. */
+                  key={`${p.key}-${scheme}`}
                   accessibilityRole="menuitem"
-                  android_ripple={RIPPLE}
+                  android_ripple={ripple.onPage}
                   style={({ pressed }) => [
                     styles.menuItem,
                     // A line between rows: above every row but the first.
@@ -3217,13 +3327,27 @@ export default function ExpenseListScreen({
   );
 }
 
-const styles = StyleSheet.create({
-  /*
-   * YOURS TO RESTYLE — the colours. The reference design, flipped for dark
-   * mode: a black page, a WHITE top card, and dark grey list cards. Text and
-   * icons inside the top card are dark (INK); everything else is light.
-   */
-  screen: { flex: 1, backgroundColor: "#000000" },
+/*
+ * Every style on these four screens, built once per palette.
+ *
+ * YOURS TO RESTYLE — everything except the colours, which now come from
+ * theme/palette.ts. There is no hex value left in this function: change a
+ * colour there and it changes here, in dark and in light, in one edit.
+ *
+ * `c` is one of the two palettes. The shape is the same one
+ * app/(tabs)/(categories)/categories.tsx and app/(tabs)/_layout.tsx already
+ * use — makeStyles(c) plus a two-entry record built at module load.
+ *
+ * THE TOP CARD IS THE ONE SURFACE THAT INVERTS. It is white on a black page
+ * in dark mode and black on a grey page in light mode, deliberately, so it
+ * reads as the thing you look at first. That is why its controls have their
+ * own tokens — heroInk, heroLabel, heroIconBg, addBg, addIcon, heroPlaceholder,
+ * heroDangerInk — rather than borrowing text, textDim or dangerInk, which
+ * belong to the page and the list cards and run the other way.
+ */
+const makeStyles = (c: Palette) =>
+  StyleSheet.create({
+  screen: { flex: 1, backgroundColor: c.page },
 
   // YOURS TO RESTYLE — the top card.
   hero: {
@@ -3233,7 +3357,7 @@ const styles = StyleSheet.create({
     paddingTop: 12,
     paddingBottom: 20,
     borderRadius: 28,
-    backgroundColor: "#FFFFFF",
+    backgroundColor: c.heroBg,
     alignItems: "center",
   },
   // Stretches across the card so the ⋯ can sit in its top-right corner.
@@ -3252,7 +3376,7 @@ const styles = StyleSheet.create({
     width: 36,
     height: 36,
     borderRadius: 18,
-    backgroundColor: "#F2F2F7",
+    backgroundColor: c.heroIconBg,
     alignItems: "center",
     justifyContent: "center",
     overflow: "hidden",
@@ -3263,7 +3387,7 @@ const styles = StyleSheet.create({
    * so the card is one line taller than before. Lower the 96 to win it back.
    */
   monthLabel: {
-    color: INK,
+    color: c.heroInk,
     fontSize: 18,
     fontWeight: "700",
     marginTop: 96,
@@ -3272,7 +3396,7 @@ const styles = StyleSheet.create({
    * it keeps its own marginTop below. */
   headerLabelUnderMonth: { marginTop: 4 },
    headerLabel: {
-    color: "#6E6E73",
+    color: c.heroLabel,
     fontSize: 13,
     letterSpacing: 0.5,
     textTransform: "uppercase",
@@ -3285,7 +3409,7 @@ const styles = StyleSheet.create({
     maxWidth: "100%",
   },
   headerTotal: {
-    color: INK,
+    color: c.heroInk,
     fontSize: 40,
     fontWeight: "700",
     marginTop: 6,
@@ -3314,7 +3438,7 @@ const styles = StyleSheet.create({
    */
   heroCircleScrim: {
     ...StyleSheet.absoluteFillObject,
-    backgroundColor: "rgba(0,0,0,0.30)",
+    backgroundColor: c.heroCircleScrim,
     alignItems: "center",
     justifyContent: "center",
     pointerEvents: "none",
@@ -3323,7 +3447,7 @@ const styles = StyleSheet.create({
     width: 44,
     height: 44,
     borderRadius: 22,
-    backgroundColor: "rgba(0,0,0,0.55)",
+    backgroundColor: c.pencilDiscBg,
     alignItems: "center",
     justifyContent: "center",
   },
@@ -3339,7 +3463,7 @@ const styles = StyleSheet.create({
     marginTop: 18,
     // The one dark thing on the white card, so + is the first thing seen.
     // Its icon is white and its ripple is the white one.
-    backgroundColor: "#000000",
+    backgroundColor: c.addBg,
     alignItems: "center",
     justifyContent: "center",
     overflow: "hidden",
@@ -3351,7 +3475,7 @@ const styles = StyleSheet.create({
    * between the total and the count.
    */
   heroTitle: {
-    color: INK,
+    color: c.heroInk,
     fontSize: 30,
     fontWeight: "700",
     marginTop: 8,
@@ -3404,18 +3528,19 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     height: 44,
     borderRadius: 10,
-    backgroundColor: "#F2F2F7",
-    color: INK,
+    backgroundColor: c.heroIconBg,
+    color: c.heroInk,
     fontSize: 24,
     fontWeight: "700",
     textAlign: "center",
   },
-  /* renameCategory's message. NOT the app's usual #E5484D: that red reads
-   * 3.91 on this white card, and a line of 13px text wants more. #C62B30
-   * reads 5.54 [V, computed]. The field behind the name is #F2F2F7, the same
-   * pair the ⋯ button already uses on this card. */
+  /* renameCategory's message, on the top card — so it uses heroDangerInk,
+   * not dangerInk. The two are exact inverses, because the card is: #C62B30
+   * reads 5.54 on dark's white card and #E5484D reads 5.37 on light's black
+   * one [V, computed]. Taking dangerInk here would pick, in each mode, the
+   * red chosen for the opposite surface. */
   heroError: {
-    color: "#C62B30",
+    color: c.heroDangerInk,
     fontSize: 13,
     marginTop: 8,
     textAlign: "center",
@@ -3438,7 +3563,7 @@ const styles = StyleSheet.create({
    * array of styles. */
   dim: {
     ...StyleSheet.absoluteFillObject,
-    backgroundColor: "rgba(0,0,0,0.6)",
+    backgroundColor: c.scrim,
   },
   /*
    * No height, so the box is exactly as tall as the count's text.
@@ -3446,7 +3571,7 @@ const styles = StyleSheet.create({
    * spare height, and there is none now.
    */
   heroCountBox: { marginTop: 10 },
-  heroCount: { color: "#6E6E73", fontSize: 13 },
+  heroCount: { color: c.heroLabel, fontSize: 13 },
 
   /*
    * The box the menu layer lays over the card. Its top, left and width
@@ -3466,7 +3591,7 @@ const styles = StyleSheet.create({
     position: "absolute",
     paddingVertical: 6,
     borderRadius: 12,
-    backgroundColor: "#2C2C2E",
+    backgroundColor: c.menuBg,
     overflow: "hidden",
     elevation: 8,
   },
@@ -3475,9 +3600,9 @@ const styles = StyleSheet.create({
    * 0.38 on a Pixel 8, and too thin to see on this dark grey. */
   menuItemDivider: {
     borderTopWidth: 1,
-    borderTopColor: "#636366",
+    borderTopColor: c.lineStrong,
   },
-  menuText: { color: "#FFFFFF", fontSize: 16 },
+  menuText: { color: c.textStrong, fontSize: 16 },
 
   // YOURS TO RESTYLE — the All expenses bar, and the title page's ‹ above
   // its card. Copied from the Categories screen's header, so they read as
@@ -3490,8 +3615,8 @@ const styles = StyleSheet.create({
     paddingTop: 16,
     paddingBottom: 12,
   },
-  barBack: { color: "#ECEDEE", fontSize: 30, fontWeight: "300", marginTop: -6 },
-  barTitle: { color: "#FFFFFF", fontSize: 20, fontWeight: "700" },
+  barBack: { color: c.text, fontSize: 30, fontWeight: "300", marginTop: -6 },
+  barTitle: { color: c.textStrong, fontSize: 20, fontWeight: "700" },
   barSpacer: { width: 18 },
 
   // YOURS TO RESTYLE — the undo row. The same card shape as an expense.
@@ -3503,17 +3628,17 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
     paddingHorizontal: 16,
     borderRadius: 16,
-    backgroundColor: "#1C1C1E",
+    backgroundColor: c.card,
   },
   undoText: {
-    color: "#8A8F98",
+    color: c.textDim,
     fontSize: 14,
     textDecorationLine: "line-through",
   },
   undoTitle: { flex: 1, paddingRight: 12 },
   undoAmount: { fontVariant: ["tabular-nums"], marginRight: 16 },
   listArea: { flex: 1 },
-  undoAction: { color: "#E5484D", fontSize: 14, fontWeight: "700" },
+  undoAction: { color: c.dangerInk, fontSize: 14, fontWeight: "700" },
 
   /*
    * paddingBottom only needs a little room now. Nothing floats over the
@@ -3550,7 +3675,7 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
     paddingHorizontal: 14,
     borderRadius: 16,
-    backgroundColor: "#1C1C1E",
+    backgroundColor: c.card,
     overflow: "hidden",
   },
   iconCircle: {
@@ -3566,10 +3691,10 @@ const styles = StyleSheet.create({
   // flex: 1 takes the room between the icon and the amount, so a long title
   // truncates instead of pushing the amount off the card.
   cardText: { flex: 1 },
-  rowTitle: { color: "#ECEDEE", fontSize: 16, fontWeight: "500" },
-  rowWhen: { color: "#8A8F98", fontSize: 13, marginTop: 2 },
+  rowTitle: { color: c.text, fontSize: 16, fontWeight: "500" },
+  rowWhen: { color: c.textDim, fontSize: 13, marginTop: 2 },
   rowAmount: {
-    color: "#ECEDEE",
+    color: c.text,
     fontSize: 16,
     fontWeight: "600",
     fontVariant: ["tabular-nums"],
@@ -3610,10 +3735,10 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
-  rowActionEdit: { backgroundColor: "#636366" },
+  rowActionEdit: { backgroundColor: c.swipeEdit },
   // Delete is the one loud colour, so it reads as destructive before the
   // icon is read.
-  rowActionDelete: { backgroundColor: "#FF453A" },
+  rowActionDelete: { backgroundColor: c.swipeDelete },
 
   // YOURS TO RESTYLE — the empty screens.
   empty: {
@@ -3622,21 +3747,42 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     paddingVertical: 48,
   },
-  emptyTitle: { color: "#ECEDEE", fontSize: 17, fontWeight: "600" },
-  emptyBody: { color: "#8A8F98", fontSize: 14, marginTop: 6 },
+  emptyTitle: { color: c.text, fontSize: 17, fontWeight: "600" },
+  emptyBody: { color: c.textDim, fontSize: 14, marginTop: 6 },
   emptyAction: { marginTop: 16, paddingHorizontal: 12, paddingVertical: 6 },
-  emptyActionText: { color: "#E5484D", fontSize: 15, fontWeight: "700" },
-
-  // iOS only — see iosPressed. Android shows its ripple instead.
-  iosPressed: { opacity: 0.6 },
+  emptyActionText: { color: c.dangerInk, fontSize: 15, fontWeight: "700" },
 
   footer: {
-    color: "#8A8F98",
+    color: c.textDim,
     fontSize: 13,
     textAlign: "center",
     paddingVertical: 16,
   },
+  });
 
+/*
+ * Both sets, built once at module load — not per render, and not per row.
+ *
+ * There are exactly two palettes and they are written in the source, so
+ * there is nothing to compute at runtime and nothing that can go stale.
+ * Every component in this file, ExpenseRow included, reads STYLES[scheme].
+ */
+const STYLES: Record<Scheme, ReturnType<typeof makeStyles>> = {
+  dark: makeStyles(DARK),
+  light: makeStyles(LIGHT),
+};
+
+/*
+ * The dev row, kept OUT of the palette on purpose.
+ *
+ * Its JSX is commented out, so nothing here is ever drawn. Tokenising it
+ * would have changed #22262E — a colour that exists nowhere else in the
+ * app — into c.card, which is a change to dark mode for a button nobody
+ * can see. The eight chrome Ionicons glyphs are the other exception of
+ * this kind.
+ */
+/*
+const devStyles = StyleSheet.create({
   devRow: {
     flexDirection: "row",
     // The buttons no longer fit on one line on a narrow phone. Without
@@ -3654,3 +3800,4 @@ const styles = StyleSheet.create({
   },
   devButtonText: { color: "#8A8F98", fontSize: 13 },
 });
+*/

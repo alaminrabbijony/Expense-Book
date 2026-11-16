@@ -1,9 +1,16 @@
 import { holdAddSheetTitle } from "@/comp/addSheet";
 import ExpenseListScreen from "@/comp/ExpenseListScreen";
 import { readExpenseTitle } from "@/db/expenses";
+import { DARK, LIGHT, schemeOf, type Palette, type Scheme } from "@/theme/palette";
 import { router, useFocusEffect, useLocalSearchParams } from "expo-router";
 import { useCallback, useState } from "react";
-import { Pressable, StatusBar, StyleSheet, Text, View } from "react-native";
+import {
+  Pressable,
+  StyleSheet,
+  Text,
+  useColorScheme,
+  View,
+} from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
 /*
@@ -20,6 +27,12 @@ import { SafeAreaView } from "react-native-safe-area-context";
  * The page itself is the list screen Home and All use, in title mode: the same
  * card, the same swipe Edit and Delete, the same Undo. This file only turns the
  * id into a title.
+ *
+ * NO StatusBar HERE ANY MORE. There is exactly one in the app, ThemedStatusBar
+ * at the root in app/_layout.tsx. React Native's StatusBar is a
+ * last-mounted-wins stack, and this page lives inside a tab's stack, so once
+ * its gone screen had mounted its bar would have gone on winning after you
+ * left the page — light icons on a light screen.
  */
 export default function TitlePage() {
   /*
@@ -27,6 +40,16 @@ export default function TitlePage() {
    * app runs. So the typeof makes sure only a string reaches the read.
    */
   const { id } = useLocalSearchParams<{ id: string }>();
+
+  /*
+   * The phone's light/dark setting, for the gone screen below.
+   *
+   * Above the early return, like the hook below it: a hook cannot run
+   * conditionally. It costs nothing on the normal path — this component
+   * renders three elements and then hands over to the list screen, which
+   * reads the scheme itself.
+   */
+  const styles = STYLES[schemeOf(useColorScheme())];
 
   /*
    * Read once, from the tapped expense. The title the page shows never
@@ -66,7 +89,6 @@ export default function TitlePage() {
     /* The expense was deleted before the page could read it. */
     return (
       <SafeAreaView style={styles.screen} edges={SAFE_EDGES}>
-        <StatusBar barStyle="light-content" />
         <View style={styles.bar}>
           <Pressable
             accessibilityRole="button"
@@ -94,22 +116,38 @@ export default function TitlePage() {
  * No "bottom". SafeAreaView pads by its provider's insets, not by where the
  * view sits, and the tab bar already pads the bottom of everything inside the
  * tabs. Keeping "bottom" here would stack a second gap on top of the bar's.
+ *
+ * The list screen padded FOUR here until Session 35, on a comment saying this
+ * page "opens over the tabs". That stopped being true at Session 29, when the
+ * page moved inside the tab's own stack. Both files now pad three.
  */
 const SAFE_EDGES = ["top", "left", "right"] as const;
 
-/* YOURS TO RESTYLE. The same values as the list screen's bar and empty
- * text, so the gone page looks like the rest of the app. */
-const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: "#000000" },
-  bar: {
-    flexDirection: "row",
-    alignItems: "center",
-    paddingHorizontal: 20,
-    paddingTop: 16,
-    paddingBottom: 12,
-  },
-  barBack: { color: "#ECEDEE", fontSize: 30, fontWeight: "300", marginTop: -6 },
-  empty: { flex: 1, alignItems: "center", justifyContent: "center" },
-  emptyTitle: { color: "#ECEDEE", fontSize: 17, fontWeight: "600" },
-  emptyBody: { color: "#8A8F98", fontSize: 14, marginTop: 6 },
-});
+/* YOURS TO RESTYLE — everything but the colours, which come from
+ * theme/palette.ts. The same tokens the list screen's bar and empty text use,
+ * so the gone page looks like the rest of the app in both modes. */
+const makeStyles = (c: Palette) =>
+  StyleSheet.create({
+    screen: { flex: 1, backgroundColor: c.page },
+    bar: {
+      flexDirection: "row",
+      alignItems: "center",
+      paddingHorizontal: 20,
+      paddingTop: 16,
+      paddingBottom: 12,
+    },
+    barBack: {
+      color: c.text,
+      fontSize: 30,
+      fontWeight: "300",
+      marginTop: -6,
+    },
+    empty: { flex: 1, alignItems: "center", justifyContent: "center" },
+    emptyTitle: { color: c.text, fontSize: 17, fontWeight: "600" },
+    emptyBody: { color: c.textDim, fontSize: 14, marginTop: 6 },
+  });
+
+const STYLES: Record<Scheme, ReturnType<typeof makeStyles>> = {
+  dark: makeStyles(DARK),
+  light: makeStyles(LIGHT),
+};

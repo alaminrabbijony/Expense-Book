@@ -1,4 +1,5 @@
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { PALETTES, type Palette, type Scheme } from "@/theme/palette";
 
 // id is nullable because ONE caller has a row that is not a category.
 // The filter's "All categories" is an item with id: null — not a mode this
@@ -18,9 +19,33 @@ type Props = {
   // and ticks nothing in a list that has no null item.
   selectedId: string | null;
   onSelect: (item: CategoryListItem) => void;
+  /*
+   * REQUIRED, and a prop rather than a useColorScheme() call in here — the
+   * opposite of what comp/BottomSheet.tsx and comp/ExpenseForm.tsx do, for a
+   * reason that is specific and checkable.
+   *
+   * Both of this component's callers already read the scheme, so a prop costs
+   * nothing. And reading it in here would be actively wrong while
+   * comp/CategorySheet.tsx is still a hardcoded black sheet: these rows would
+   * turn dark the moment the phone went light, on a surface that stayed black,
+   * and `text` on that sheet's card reads 1.00 — invisible, with nothing
+   * thrown.
+   *
+   * Required rather than defaulted so the compiler names every caller. A
+   * default of "dark" would let an unthemed caller keep compiling and keep
+   * drawing dark, and nothing would say which ones were left.
+   */
+  scheme: Scheme;
 };
 
-export default function CategoryList({ items, selectedId, onSelect }: Props) {
+export default function CategoryList({
+  items,
+  selectedId,
+  onSelect,
+  scheme,
+}: Props) {
+  const styles = STYLES[scheme];
+
   return (
     // A ScrollView, not a FlatList. A handful of rows needs no
     // virtualization, and decisions.md keeps FlatList out of the sheets.
@@ -56,32 +81,49 @@ export default function CategoryList({ items, selectedId, onSelect }: Props) {
   );
 }
 
-const styles = StyleSheet.create({
-  // A ScrollView's built-in style has flexGrow: 1, so it would stretch into
-  // any spare room a caller has and push whatever sits below it down. The
-  // View this replaced stayed the height of its rows; flexGrow: 0 keeps
-  // that. flexShrink: 1 still comes from the built-in style — it is what
-  // lets the list get shorter than its rows, which is when it scrolls.
-  list: { flexGrow: 0 },
-  row: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    paddingVertical: 14,
-    paddingHorizontal: 20,
-  },
-  rowName: { color: "#ECEDEE", fontSize: 16, fontWeight: "500" },
-  rowNums: { color: "#8A8F98", fontSize: 14, fontVariant: ["tabular-nums"] },
-   divider: {
-    // 1dp, not StyleSheet.hairlineWidth. A hairline is 0.36dp on a Pixel 8,
-    // and at this colour against the surface behind it the line is drawn
-    // and not seen — the same pair that was already found invisible on the
-    // period menu, which is where this 1dp #636366 comes from.
-    height: 1,
-    backgroundColor: "#636366",
-    // Matches the row's own paddingHorizontal, so the line starts where the
-    // text starts rather than at the box's edge.
-    marginHorizontal: 20,
-  },
-  
-});
+/*
+ * Built twice at module load, once per palette — the shape every themed file
+ * in this project uses.
+ */
+function makeStyles(c: Palette) {
+  return StyleSheet.create({
+    // A ScrollView's built-in style has flexGrow: 1, so it would stretch into
+    // any spare room a caller has and push whatever sits below it down. The
+    // View this replaced stayed the height of its rows; flexGrow: 0 keeps
+    // that. flexShrink: 1 still comes from the built-in style — it is what
+    // lets the list get shorter than its rows, which is when it scrolls.
+    list: { flexGrow: 0 },
+    row: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-between",
+      paddingVertical: 14,
+      paddingHorizontal: 20,
+    },
+    // 14.52 on the dark box, 17.01 on the light one.
+    rowName: { color: c.text, fontSize: 16, fontWeight: "500" },
+    // The filter's counts and money. 5.24 dark, 5.07 light.
+    rowNums: { color: c.textDim, fontSize: 14, fontVariant: ["tabular-nums"] },
+    divider: {
+      // 1dp, not StyleSheet.hairlineWidth. A hairline is 0.36dp on a Pixel 8,
+      // and at this colour against the surface behind it the line is drawn
+      // and not seen — the same pair that was already found invisible on the
+      // period menu, which is where this 1dp line comes from.
+      //
+      // lineStrong, the LOUD divider, not line. It is the same #636366 in dark,
+      // byte for byte. In light it becomes #A8A8AD and reads 2.37, where the
+      // dark value left on a white box reads 5.99 — a hard black rule across a
+      // white sheet, which is what it was doing before this change.
+      height: 1,
+      backgroundColor: c.lineStrong,
+      // Matches the row's own paddingHorizontal, so the line starts where the
+      // text starts rather than at the box's edge.
+      marginHorizontal: 20,
+    },
+  });
+}
+
+const STYLES: Record<Scheme, ReturnType<typeof makeStyles>> = {
+  dark: makeStyles(PALETTES.dark),
+  light: makeStyles(PALETTES.light),
+};

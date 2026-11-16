@@ -20,8 +20,10 @@ import {
   StyleSheet,
   Text,
   TextInput,
+  useColorScheme,
   View,
 } from "react-native";
+import { PALETTES, schemeOf, type Palette, type Scheme } from "@/theme/palette";
 import CategoryList from "./CategoryLListItem";
 import { toInput } from "../../../packages/shared/src/money";
 
@@ -64,6 +66,20 @@ export default function ExpenseForm({
   submitLabel,
   onSubmit,
 }: Props) {
+  /*
+   * Read here rather than taken as a prop, for the same reason
+   * comp/BottomSheet.tsx does: the parent is app/(tabs)/_layout.tsx, which
+   * holds the tab navigator, and useColorScheme() re-renders whatever calls
+   * it. This form is a leaf; that layout is not.
+   *
+   * `c` is the palette itself, needed as well as `styles` because
+   * placeholderTextColor is a PROP on TextInput, not a style, so it cannot
+   * come out of a StyleSheet.
+   */
+  const scheme = schemeOf(useColorScheme());
+  const styles = STYLES[scheme];
+  const c = PALETTES[scheme];
+
   /*
    * A new expense that arrived with its title already written.
    *
@@ -358,7 +374,7 @@ export default function ExpenseForm({
           setPickerOpen(false);
         }}
         placeholder="What for?"
-        placeholderTextColor="#4A4F58"
+        placeholderTextColor={c.placeholder}
         // "next", not "done". This key does not save — it moves to the
         // amount, which is the only field that can make canSave true.
         returnKeyType="next"
@@ -380,7 +396,7 @@ export default function ExpenseForm({
           value={amount}
           onChangeText={(t) => setAmount(sanitizeAmount(t, currencyCode))}
           placeholder="0.00"
-          placeholderTextColor="#4A4F58"
+          placeholderTextColor={c.placeholder}
           keyboardType="decimal-pad"
           maxLength={12}
           returnKeyType="done"
@@ -416,7 +432,7 @@ export default function ExpenseForm({
             value={newCatDraft}
             onChangeText={setNewCatDraft}
             placeholder="New category"
-            placeholderTextColor="#5A606B"
+            placeholderTextColor={c.placeholder}
             autoFocus
             onSubmitEditing={saveNewCategory}
             returnKeyType="done"
@@ -470,6 +486,9 @@ export default function ExpenseForm({
       {pickerOpen ? (
         <View style={styles.pickerBox}>
                    <CategoryList
+            // Required there, and this component already read it above. See
+            // the comment on that prop for why it is a prop and not a hook.
+            scheme={scheme}
             // No null item, so no "All categories" row. That is the entire
             // difference between this list and the filter's.
             //
@@ -507,133 +526,166 @@ export default function ExpenseForm({
   );
 }
 
-const styles = StyleSheet.create({
-  // No backgroundColor and no border. The sheet paints its own surface behind
-  // this, and a second panel inside the panel would show as a seam.
-  form: { paddingHorizontal: 20, paddingTop: 8, gap: 12 },
+/*
+ * Built twice at module load, once per palette — the shape every themed file
+ * in this project uses. Nothing here is computed at runtime, because there
+ * are exactly two palettes and both are written in the source.
+ */
+function makeStyles(c: Palette) {
+  return StyleSheet.create({
+    // No backgroundColor and no border. The sheet paints its own surface behind
+    // this, and a second panel inside the panel would show as a seam.
+    form: { paddingHorizontal: 20, paddingTop: 8, gap: 12 },
 
-  titleInput: {
-    color: "#ECEDEE",
-    fontSize: 16,
-    // The app's list-card colour. It reads at 1.23 against the sheet's black,
-    // which is the same card-on-page pair the list screens use. Against the
-    // sheet's old #171B22 this same colour read at 1.01 — no edge at all.
-    backgroundColor: "#1C1C1E",
-    borderRadius: 10,
-    paddingHorizontal: 14,
-    paddingVertical: 14,
-  },
+    titleInput: {
+      color: c.text,
+      fontSize: 16,
+      // card on the sheet's page — the same pair every list screen uses, and
+      // the same pair comp/BottomSheet.tsx is drawn for: 1.23 dark, 1.12 light.
+      backgroundColor: c.card,
+      borderRadius: 10,
+      paddingHorizontal: 14,
+      paddingVertical: 14,
+    },
 
-  amountRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: "#1C1C1E",
-    borderRadius: 10,
-    paddingHorizontal: 14,
-  },
-  currency: { color: "#8A8F98", fontSize: 24, fontWeight: "600" },
-  amountInput: {
-    flex: 1,
-    // Every TextInput needs an explicit colour on a dark surface. The
-    // default is near-black and inherits nothing from the parent View.
-    color: "#FFFFFF",
-    fontSize: 28,
-    fontWeight: "700",
-    paddingVertical: 14,
-    textAlign: "right",
-    // Digits keep a fixed width, so the number does not jitter sideways
-    // as you type. Same reason the row amounts use it.
-    fontVariant: ["tabular-nums"],
-  },
+    amountRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      backgroundColor: c.card,
+      borderRadius: 10,
+      paddingHorizontal: 14,
+    },
+    currency: { color: c.textDim, fontSize: 24, fontWeight: "600" },
+    amountInput: {
+      flex: 1,
+      // Every TextInput needs an explicit colour. The platform default is
+      // near-black and inherits nothing from the parent View — which was merely
+      // invisible on a dark field and is merely correct-looking on a light one,
+      // so neither mode would have caught a missing colour here.
+      color: c.textStrong,
+      fontSize: 28,
+      fontWeight: "700",
+      paddingVertical: 14,
+      textAlign: "right",
+      // Digits keep a fixed width, so the number does not jitter sideways
+      // as you type. Same reason the row amounts use it.
+      fontVariant: ["tabular-nums"],
+    },
 
-  // Shared by both states. The knob is 36 tall and padding is 8, so the
-  // row is 52. For semicircular ends, borderRadius has to be half of that
-  // — 26. It is 10 here to match the two fields above instead.
-  categoryRow: {
-    alignItems: "center",
-    alignSelf: "stretch",
-    minHeight: 52,
-    borderRadius: 10,
-    padding: 8,
-    backgroundColor: "#1C1C1E",
-  },
-  // The ONLY difference between the two states is which way the row runs.
-  categoryRowClosed: { flexDirection: "row-reverse" },
-  categoryRowOpen: { flexDirection: "row" },
+    // Shared by both states. The knob is 36 tall and padding is 8, so the
+    // row is 52. For semicircular ends, borderRadius has to be half of that
+    // — 26. It is 10 here to match the two fields above instead.
+    categoryRow: {
+      alignItems: "center",
+      alignSelf: "stretch",
+      minHeight: 52,
+      borderRadius: 10,
+      padding: 8,
+      backgroundColor: c.card,
+    },
+    // The ONLY difference between the two states is which way the row runs.
+    categoryRowClosed: { flexDirection: "row-reverse" },
+    categoryRowOpen: { flexDirection: "row" },
 
-  categoryLabel: {
-    flex: 1,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    paddingHorizontal: 14,
-  },
-  categoryName: { color: "#ECEDEE", fontSize: 16 },
-  // Same colour as the two placeholders above, so an unchosen category
-  // reads as empty rather than as a value.
-  categoryEmpty: { color: "#4A4F58", fontSize: 16 },
-  chevron: { color: "#8A8F98", fontSize: 12 },
+    categoryLabel: {
+      flex: 1,
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-between",
+      paddingHorizontal: 14,
+    },
+    categoryName: { color: c.text, fontSize: 16 },
+    // Same token as the two placeholders above, so an unchosen category still
+    // reads as empty rather than as a value. It has to move with them.
+    categoryEmpty: { color: c.placeholder, fontSize: 16 },
+    chevron: { color: c.textDim, fontSize: 12 },
 
-  newCatInput: {
-    flex: 1,
-    color: "#ECEDEE",
-    fontSize: 16,
-    paddingHorizontal: 14,
-    // Android gives TextInput vertical padding of its own, which would
-    // push this row past 52 and break the knob's centring.
-    paddingVertical: 0,
-  },
-  clear: { paddingHorizontal: 12 },
-  clearText: { color: "#8A8F98", fontSize: 16 },
+    newCatInput: {
+      flex: 1,
+      color: c.text,
+      fontSize: 16,
+      paddingHorizontal: 14,
+      // Android gives TextInput vertical padding of its own, which would
+      // push this row past 52 and break the knob's centring.
+      paddingVertical: 0,
+    },
+    clear: { paddingHorizontal: 12 },
+    clearText: { color: c.textDim, fontSize: 16 },
 
-  // YOURS TO RESTYLE — white with a black glyph, the same pair as the tab
-  // bar's + and the opposite of the top card's. Red is gone from every
-  // control in this form; it is left only on the error line below, where it
-  // means something.
-  knob: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    backgroundColor: "#FFFFFF",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  knobText: {
-    color: "#000000",
-    fontSize: 20,
-    fontWeight: "600",
-    // Android pads text vertically with invisible space, which pushes the
-    // glyph below the centre of a circle. Android-only, no effect on iOS.
-    includeFontPadding: false,
-    marginTop: -1,
-  },
-  error: { color: "#E5484D", fontSize: 13, paddingHorizontal: 4 },
+    // YOURS TO RESTYLE — it IS the tab bar's + pair now, which is what this
+    // comment always said it matched. So it inverts: white circle with a black
+    // glyph in dark, black circle with a white glyph in light. Red is gone from
+    // every control in this form; it is left only on the error line below,
+    // where it means something.
+    knob: {
+      width: 36,
+      height: 36,
+      borderRadius: 18,
+      backgroundColor: c.barAddBg,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    knobText: {
+      color: c.barAddIcon,
+      fontSize: 20,
+      fontWeight: "600",
+      // Android pads text vertically with invisible space, which pushes the
+      // glyph below the centre of a circle. Android-only, no effect on iOS.
+      includeFontPadding: false,
+      marginTop: -1,
+    },
+    // dangerInk, not danger: this is TEXT on a surface, not a fill. 5.37 on the
+    // dark sheet, 4.97 on the light one.
+    error: { color: c.dangerInk, fontSize: 13, paddingHorizontal: 4 },
 
-  // CategoryList brings its own horizontal padding of 20. This box only
-  // supplies the surface behind it.
-  //
-  // maxHeight is what makes the list scroll. CategoryList's ScrollView can
-  // get shorter than its own rows, but only when something above it is
-  // limited — and this View is the only thing between it and the form.
-  // Without the limit the box grows to the height of every category and
-  // pushes the button down.
-  pickerBox: {
-    backgroundColor: "#1C1C1E",
-    borderRadius: 10,
-    overflow: "hidden",
-    maxHeight: 220,
-  },
-  // YOURS TO RESTYLE — white with black text. Black on white reads at 21.00,
-  // against 3.91 for the white-on-red it replaces.
-  button: {
-    backgroundColor: "#FFFFFF",
-    borderRadius: 10,
-    paddingVertical: 14,
-    alignItems: "center",
-    marginTop: 4,
-  },
-  // Named rather than inline, so the disabled look is one thing you can
-  // change in one place.
-  buttonDisabled: { opacity: 0.35 },
-  buttonText: { color: "#000000", fontSize: 16, fontWeight: "600" },
-});
+    // CategoryList brings its own horizontal padding of 20. This box only
+    // supplies the surface behind it.
+    //
+    // maxHeight is what makes the list scroll. CategoryList's ScrollView can
+    // get shorter than its own rows, but only when something above it is
+    // limited — and this View is the only thing between it and the form.
+    // Without the limit the box grows to the height of every category and
+    // pushes the button down.
+    pickerBox: {
+      backgroundColor: c.card,
+      borderRadius: 10,
+      overflow: "hidden",
+      maxHeight: 220,
+    },
+    // YOURS TO RESTYLE — follows the tab bar's +, which is the control it was
+    // drawn to match at Session 30 and which started inverting at Session 34.
+    // So: white with black text in dark (unchanged), black with white text in
+    // light. The label reads 21.00 on it either way.
+    button: {
+      backgroundColor: c.barAddBg,
+      borderRadius: 10,
+      paddingVertical: 14,
+      alignItems: "center",
+      marginTop: 4,
+    },
+    /*
+     * Named rather than inline, so the disabled look is one thing you can
+     * change in one place.
+     *
+     * 0.35 is UNCHANGED, and it is worth knowing it does not mean the same
+     * thing in both modes. An opacity blends the button AND its label toward
+     * whatever is behind — the sheet — and the two palettes sit at different
+     * distances from their button. Dark reads 3.00 against the sheet; light
+     * reads 2.42 [both computed].
+     *
+     * Left at one value on purpose: a disabled control is meant to recede, and
+     * inverting the button already took light from 1.04 (a button-shaped
+     * nothing) to 2.42. If it ever needs to be stronger, 0.45 is the smallest
+     * single value clearing 3.00 in both — at the cost of a brighter disabled
+     * button in dark — and a per-mode pair in the palette is the alternative,
+     * exactly as dimOpacity already does.
+     */
+    buttonDisabled: { opacity: 0.35 },
+    buttonText: { color: c.barAddIcon, fontSize: 16, fontWeight: "600" },
+  });
+}
+
+const STYLES: Record<Scheme, ReturnType<typeof makeStyles>> = {
+  dark: makeStyles(PALETTES.dark),
+  light: makeStyles(PALETTES.light),
+};

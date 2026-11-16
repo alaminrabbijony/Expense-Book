@@ -4,6 +4,8 @@ import {
   CategoryGlyph,
   DEFAULT_CATEGORY_ICON,
   parseIcon,
+  PLACEHOLDER_SHADE,
+  type Shade,
 } from "@/comp/categoryIcon";
 import { memo, useMemo, useState } from "react";
 import {
@@ -13,8 +15,10 @@ import {
   StyleSheet,
   Text,
   TextInput,
+  useColorScheme,
   View,
 } from "react-native";
+import { PALETTES, schemeOf, type Palette, type Scheme } from "@/theme/palette";
 
 /*
  * The icon catalog: every glyph in both installed fonts, in a sheet with a
@@ -45,10 +49,16 @@ const CHOICES = ALL_ICON_VALUES.map((value) => ({
 const COLUMNS = 6;
 
 /*
- * Tap feedback, the app's rule: Android ripples, iOS dims. The sheet behind
- * these is black, so the ripple is the light one.
+ * Tap feedback, the app's rule: Android ripples, iOS dims.
+ *
+ * One object per palette, built at module load, because a ripple is chosen by
+ * what is BEHIND it — and these sit on the sheet, which is `page`. Light on a
+ * dark sheet, dark on a pale one.
  */
-const RIPPLE = { color: "rgba(255,255,255,0.22)" };
+const RIPPLES: Record<Scheme, { color: string }> = {
+  dark: { color: PALETTES.dark.rippleOnPage },
+  light: { color: PALETTES.light.rippleOnPage },
+};
 
 type Props = {
   visible: boolean;
@@ -85,6 +95,7 @@ const IconCell = memo(function IconCell({
   picked,
   color,
   tint,
+  scheme,
   onPick,
 }: {
   value: string;
@@ -93,13 +104,34 @@ const IconCell = memo(function IconCell({
   picked: boolean;
   color: string;
   tint: string;
+  scheme: Scheme;
   onPick: (value: string) => void;
 }) {
+  const styles = STYLES[scheme];
+
   return (
     <Pressable
+      /*
+       * key={scheme}, and this is the Session 35 rule firing for the first
+       * time in the add sheet.
+       *
+       * android_ripple makes React Native rebuild this view's WHOLE background
+       * as one composite drawable, so a themed background behind a ripple
+       * stops updating and goes stale on a live theme switch. The picked cell
+       * carries `tint`, which moves with the palette. The key throws the
+       * native view away instead.
+       *
+       * The expense card dropped its ripple rather than take a key, because
+       * keying 50 always-mounted rows per toggle is expensive and snaps open
+       * swipes shut. Neither applies here: this sheet is a Modal, so its
+       * children unmount when it closes, and the key is on the Pressable
+       * INSIDE the memo'd cell — the FlatList's own keys never change, so the
+       * scroll position survives.
+       */
+      key={scheme}
       accessibilityRole="button"
       accessibilityLabel={name}
-      android_ripple={RIPPLE}
+      android_ripple={RIPPLES[scheme]}
       style={({ pressed }) => [
         styles.cell,
         picked && { backgroundColor: tint },
@@ -115,7 +147,7 @@ const IconCell = memo(function IconCell({
         family={family}
         name={name}
         size={26}
-        color={picked ? color : "#ECEDEE"}
+        color={picked ? color : PALETTES[scheme].text}
       />
     </Pressable>
   );
@@ -129,6 +161,20 @@ export default function IconPicker({
   onPick,
   onClose,
 }: Props) {
+  /*
+   * Read here rather than taken as a prop. This component owns every surface
+   * it draws on except the sheet itself, and that sheet is comp/BottomSheet.tsx,
+   * which is themed — so there is nothing left in its tree that could still be
+   * hardcoded and disagree with it.
+   */
+  const scheme = schemeOf(useColorScheme());
+  const styles = STYLES[scheme];
+  const c = PALETTES[scheme];
+  /* The unset-icon pair, from the one file that decides what "no icon" looks
+   * like. Using anything else here would make this row disagree with the same
+   * placeholder drawn on the Categories tab and the category page. */
+  const ph = PLACEHOLDER_SHADE[scheme];
+
   const [query, setQuery] = useState("");
 
   /*
@@ -156,7 +202,7 @@ export default function IconPicker({
         /* The count comes from the array, so it can never say a number the
          * fonts disagree with. */
         placeholder={`Search ${CHOICES.length} icons`}
-        placeholderTextColor="#8E8E93"
+        placeholderTextColor={c.placeholder}
         autoCorrect={false}
         autoCapitalize="none"
         returnKeyType="search"
@@ -165,9 +211,12 @@ export default function IconPicker({
       {/* Clearing the icon is not an icon, so it is not a cell in the grid.
           A cell would need a fake value in a list of real ones. */}
       <Pressable
+        /* Same reason as the cells above: this row takes a themed background
+         * when it is the one picked. */
+        key={scheme}
         accessibilityRole="button"
         accessibilityLabel="No icon"
-        android_ripple={RIPPLE}
+        android_ripple={RIPPLES[scheme]}
         style={({ pressed }) => [
           styles.noneRow,
           selected === null && styles.noneRowPicked,
@@ -182,7 +231,7 @@ export default function IconPicker({
             family={DEFAULT_CATEGORY_ICON.family}
             name={DEFAULT_CATEGORY_ICON.name}
             size={20}
-            color="#ECEDEE"
+            color={ph.color}
           />
         </View>
         <Text style={styles.noneText}>No icon</Text>
@@ -214,7 +263,10 @@ export default function IconPicker({
         columnWrapperStyle={styles.gridRow}
         /* The picked value changes which cell draws itself selected, and it
          * is not part of `data`. Without this, the old cell would stay lit. */
-        extraData={`${selected}|${color}`}
+        /* `scheme` is in here as well as on every cell, the same shape
+         * todayStart and clock24 use on the expense list: a palette switch
+         * changes no prop a memo'd cell can see by itself. */
+        extraData={`${selected}|${color}|${scheme}`}
         ListEmptyComponent={
           <Text style={styles.empty}>No icon called “{query.trim()}”.</Text>
         }
@@ -226,6 +278,7 @@ export default function IconPicker({
             picked={item.value === selected}
             color={color}
             tint={tint}
+            scheme={scheme}
             onPick={onPick}
           />
         )}
@@ -235,56 +288,74 @@ export default function IconPicker({
 }
 
 /* YOURS TO RESTYLE — everything here except the grid's height, which is
- * explained where it is used. The colours are the add sheet's: a black sheet
- * with #1C1C1E fields. */
-const styles = StyleSheet.create({
-  search: {
-    height: 44,
-    borderRadius: 10,
-    paddingHorizontal: 14,
-    paddingVertical: 0,
-    backgroundColor: "#1C1C1E",
-    color: "#ECEDEE",
-    fontSize: 16,
-  },
+ * explained where it is used. The colours are the add sheet's, which is
+ * literally true now: this renders inside comp/BottomSheet.tsx, so the sheet
+ * is `page` and these fields are `card`, the same pair. */
+/*
+ * Built twice at module load, once per palette. It takes the placeholder pair
+ * as well as the palette, because "no icon" is not a palette token — it is
+ * derived, and comp/categoryIcon.tsx is the one file that decides it.
+ */
+function makeStyles(c: Palette, ph: Shade) {
+  return StyleSheet.create({
+    search: {
+      height: 44,
+      borderRadius: 10,
+      paddingHorizontal: 14,
+      paddingVertical: 0,
+      backgroundColor: c.card,
+      color: c.text,
+      fontSize: 16,
+    },
 
-  noneRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 12,
-    marginTop: 12,
-    paddingVertical: 10,
-    paddingHorizontal: 12,
-    borderRadius: 12,
-    overflow: "hidden",
-  },
-  noneRowPicked: { backgroundColor: "#2C2C2E" },
-  noneCircle: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: "#2C2C2E",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  noneText: { color: "#ECEDEE", fontSize: 16, fontWeight: "500" },
+    noneRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 12,
+      marginTop: 12,
+      paddingVertical: 10,
+      paddingHorizontal: 12,
+      borderRadius: 12,
+      overflow: "hidden",
+    },
+    /* The placeholder's own tint, not a grey picked to look similar. Dark is
+     * #2C2C2E either way; light is #E5E5EA, which is what the unset circle is
+     * everywhere else in the app. */
+    noneRowPicked: { backgroundColor: ph.tint },
+    noneCircle: {
+      width: 40,
+      height: 40,
+      borderRadius: 20,
+      backgroundColor: ph.tint,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    noneText: { color: c.text, fontSize: 16, fontWeight: "500" },
 
-  grid: { height: 360, marginTop: 12 },
-  /* flex-start, so a last row holding two icons leaves them on the left
-   * instead of spreading them across the sheet. */
-  gridRow: { justifyContent: "flex-start" },
-  cell: {
-    width: 52,
-    height: 52,
-    margin: 4,
-    borderRadius: 12,
-    alignItems: "center",
-    justifyContent: "center",
-    /* Keeps the Android ripple inside the rounded corners. */
-    overflow: "hidden",
-  },
-  empty: { color: "#8A8F98", fontSize: 14, paddingVertical: 24 },
+    grid: { height: 360, marginTop: 12 },
+    /* flex-start, so a last row holding two icons leaves them on the left
+     * instead of spreading them across the sheet. */
+    gridRow: { justifyContent: "flex-start" },
+    cell: {
+      width: 52,
+      height: 52,
+      margin: 4,
+      borderRadius: 12,
+      alignItems: "center",
+      justifyContent: "center",
+      /* Keeps the Android ripple inside the rounded corners. */
+      overflow: "hidden",
+    },
+    // 6.46 dark, 4.54 light — the third place in this sheet to land on that
+    // 0.04 of margin against the 4.5 a small label needs.
+    empty: { color: c.textDim, fontSize: 14, paddingVertical: 24 },
 
-  /* iOS only. Android shows its ripple instead. */
-  iosPressed: { opacity: 0.6 },
-});
+    /* iOS only. Android shows its ripple instead. */
+    iosPressed: { opacity: 0.6 },
+  });
+}
+
+const STYLES: Record<Scheme, ReturnType<typeof makeStyles>> = {
+  dark: makeStyles(PALETTES.dark, PLACEHOLDER_SHADE.dark),
+  light: makeStyles(PALETTES.light, PLACEHOLDER_SHADE.light),
+};

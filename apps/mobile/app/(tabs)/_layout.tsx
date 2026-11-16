@@ -11,7 +11,21 @@ import Ionicons from "@expo/vector-icons/Ionicons";
 import type { BottomTabNavigationOptions } from "@react-navigation/bottom-tabs";
 import { Tabs } from "expo-router";
 import { type ComponentProps, useEffect, useState } from "react";
-import { Platform, Pressable, StyleSheet, View } from "react-native";
+import {
+  Platform,
+  Pressable,
+  StyleSheet,
+  useColorScheme,
+  View,
+} from "react-native";
+import {
+  DARK,
+  LIGHT,
+  PALETTES,
+  schemeOf,
+  type Palette,
+  type Scheme,
+} from "@/theme/palette";
 
 /*
  * `import type` from @react-navigation/bottom-tabs: only the TYPE of the
@@ -64,12 +78,36 @@ const tabIcon = (
  *
  * Built once, at module level, like every options object in this app.
  */
-const TAB_OPTIONS: BottomTabNavigationOptions = {
+const makeTabOptions = (c: Palette): BottomTabNavigationOptions => ({
   headerShown: false,
-  tabBarActiveTintColor: "#FFFFFF",
-  tabBarInactiveTintColor: "#8A8F98",
-  tabBarStyle: { backgroundColor: "#000000", borderTopColor: "#2C2C2E" },
-  sceneStyle: { backgroundColor: "#000000" },
+  /*
+   * The two label colours are textStrong and textDim, not tokens of their
+   * own. They already match in both modes — 21.00 and 6.46 against the dark
+   * bar, 18.82 and 4.54 against the light one — and a second pair holding
+   * the same values is a pair that can silently drift apart.
+   */
+  tabBarActiveTintColor: c.textStrong,
+  tabBarInactiveTintColor: c.textDim,
+  /*
+   * The bar uses `page`, like the scene behind it. In dark that is the black
+   * it has always been; in light it is #F2F2F7, so the bar sits level with
+   * the page and the line above it is what gives it an edge.
+   */
+  tabBarStyle: { backgroundColor: c.page, borderTopColor: c.line },
+  sceneStyle: { backgroundColor: c.page },
+});
+
+/*
+ * One finished options object per palette, built at module load.
+ *
+ * NOT built inside TabsLayout. screenOptions is read by the navigator, and a
+ * new object on every render makes it reconfigure every screen — the same
+ * reason every options object in this app is module level. Two objects exist
+ * for the life of the app and a theme switch picks between them.
+ */
+const TAB_OPTIONS: Record<Scheme, BottomTabNavigationOptions> = {
+  dark: makeTabOptions(DARK),
+  light: makeTabOptions(LIGHT),
 };
 
 /* `title` is the label under each icon. */
@@ -102,11 +140,19 @@ const ADD_OPTIONS: BottomTabNavigationOptions = {
 };
 
 /*
- * Tap feedback for the white circle: Android ripples, iOS dims. The ripple
- * is the DARK one because what is directly behind it is white — the same
- * rule as the top card's buttons.
+ * Tap feedback for the + circle: Android ripples, iOS dims.
+ *
+ * One per scheme, because the ripple is picked by the CIRCLE and the circle
+ * flips: white in dark mode, black in light. So a dark ripple in dark and a
+ * light ripple in light — the exact inverse of the hero card's +, which is
+ * why rippleOnBarAdd exists separately from rippleOnAdd.
+ *
+ * Built at module load, so android_ripple gets the same object every render.
  */
-const RIPPLE_ON_WHITE = { color: "rgba(0,0,0,0.12)" };
+const RIPPLES: Record<Scheme, { color: string }> = {
+  dark: { color: DARK.rippleOnBarAdd },
+  light: { color: LIGHT.rippleOnBarAdd },
+};
 
 /*
  * The + in the middle of the bar. YOURS TO RESTYLE: the size and colours.
@@ -123,25 +169,64 @@ const RIPPLE_ON_WHITE = { color: "rgba(0,0,0,0.12)" };
  * clip a shadow on iOS, but the circle has none.
  */
 function AddTabButton() {
+  /*
+   * The scheme is read HERE, in the leaf, not in TabsLayout.
+   *
+   * useColorScheme re-renders whichever component calls it. This button is
+   * four elements; TabsLayout wraps the whole navigator and the add sheet.
+   * Same reason ThemedStatusBar in app/_layout.tsx is its own component.
+   */
+  const scheme = schemeOf(useColorScheme());
+  const c = PALETTES[scheme];
+  const styles = STYLES[scheme];
+
   return (
     <View style={styles.addSlot}>
       <Pressable
+        /*
+         * key={scheme} FORCES A FRESH BUTTON WHEN THE THEME CHANGES, and it
+         * is here because of what a reload does.
+         *
+         * The symptom: after a reload the + is correct. Toggle the theme once
+         * and it goes wrong, and it STAYS wrong when you toggle back. Another
+         * reload fixes it again. Meanwhile the dev line proves the values are
+         * right every time — scheme light, circle #000000, glyph #FFFFFF.
+         *
+         * Correct on a fresh mount, wrong on an update, and sticky until the
+         * next fresh mount. That is a native view holding something it was
+         * given when it was created and not taking the new value on an
+         * update. React is doing its job; the view underneath is not.
+         *
+         * The suspect is android_ripple. On Android it becomes the view's
+         * background DRAWABLE, which is a native object rather than a style
+         * value, and RIPPLES[scheme] hands the Pressable a different one on
+         * every toggle. A key is the cheapest answer: React throws the old
+         * view away and builds a new one, which is exactly what a reload was
+         * doing by hand.
+         *
+         * It costs one button, four elements, on an event that happens when a
+         * person changes a system setting.
+         */
+        key={scheme}
         accessibilityRole="button"
         accessibilityLabel="Add expense"
-        android_ripple={RIPPLE_ON_WHITE}
+        android_ripple={RIPPLES[scheme]}
         style={({ pressed }) => [
           styles.addCircle,
           Platform.OS === "ios" && pressed ? styles.iosPressed : null,
         ]}
         onPress={requestAddSheet}
       >
-        <Ionicons name="add" size={26} color="#000000" />
+        <Ionicons name="add" size={26} color={c.barAddIcon} />
       </Pressable>
     </View>
   );
 }
 
 export default function TabsLayout() {
+  /* Only used to choose between the two finished options objects. */
+  const scheme = schemeOf(useColorScheme());
+
   const [addOpen, setAddOpen] = useState(false);
 
   /*
@@ -196,7 +281,7 @@ export default function TabsLayout() {
   return (
     <>
       {/* The order of the screens here is the order in the bar. */}
-      <Tabs screenOptions={TAB_OPTIONS}>
+      <Tabs screenOptions={TAB_OPTIONS[scheme]}>
         <Tabs.Screen name="(home)" options={HOME_OPTIONS} />
         <Tabs.Screen name="(all)" options={ALL_OPTIONS} />
         <Tabs.Screen name="add" options={ADD_OPTIONS} />
@@ -225,19 +310,31 @@ export default function TabsLayout() {
   );
 }
 
-const styles = StyleSheet.create({
-  addSlot: { flex: 1, alignItems: "center", justifyContent: "center" },
-  // YOURS TO RESTYLE — the + circle. White with a black +, the top card's +
-  // flipped.
-  addCircle: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: "#FFFFFF",
-    alignItems: "center",
-    justifyContent: "center",
-    overflow: "hidden",
-  },
-  // iOS only. Android shows its ripple instead.
-  iosPressed: { opacity: 0.6 },
-});
+const makeStyles = (c: Palette) =>
+  StyleSheet.create({
+    addSlot: { flex: 1, alignItems: "center", justifyContent: "center" },
+    /*
+     * YOURS TO RESTYLE — the + circle. It is whatever the bar is not: white
+     * on the black bar, black on the light one.
+     *
+     * Light had no second option. A white circle on the #F2F2F7 bar reads
+     * 1.12 — it would simply not be there. Black on it reads 18.82, and it
+     * matches the hero card, which is also black in light mode.
+     */
+    addCircle: {
+      width: 40,
+      height: 40,
+      borderRadius: 20,
+      backgroundColor: c.barAddBg,
+      alignItems: "center",
+      justifyContent: "center",
+      overflow: "hidden",
+    },
+    // iOS only. Android shows its ripple instead.
+    iosPressed: { opacity: 0.6 },
+  });
+
+const STYLES: Record<Scheme, ReturnType<typeof makeStyles>> = {
+  dark: makeStyles(DARK),
+  light: makeStyles(LIGHT),
+};

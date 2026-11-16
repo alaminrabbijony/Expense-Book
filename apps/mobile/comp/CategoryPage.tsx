@@ -1,8 +1,15 @@
 import ExpenseListScreen from "@/comp/ExpenseListScreen";
 import { readCategoryDetail } from "@/db/expenses";
+import { DARK, LIGHT, schemeOf, type Palette, type Scheme } from "@/theme/palette";
 import { router, useLocalSearchParams } from "expo-router";
 import { useState } from "react";
-import { Pressable, StatusBar, StyleSheet, Text, View } from "react-native";
+import {
+  Pressable,
+  StyleSheet,
+  Text,
+  useColorScheme,
+  View,
+} from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
 /*
@@ -19,6 +26,11 @@ import { SafeAreaView } from "react-native-safe-area-context";
  * category mode: the same card, the same swipe Edit and Delete, the same Undo,
  * and the same This month / This year / All time menu on its ⋯. This file only
  * decides whether the page can open at all.
+ *
+ * NO StatusBar HERE ANY MORE. Session 34's handoff recorded this file's one as
+ * deleted by hand and marked the claim [C]; the Session 35 search found it
+ * still here, and comp/TitlePage.tsx holding a twin. There is exactly one in
+ * the app now, ThemedStatusBar at the root in app/_layout.tsx.
  */
 export default function CategoryPage() {
   /*
@@ -26,6 +38,12 @@ export default function CategoryPage() {
    * app runs. So the typeof makes sure only a string reaches the read.
    */
   const { id } = useLocalSearchParams<{ id: string }>();
+
+  /*
+   * The phone's light/dark setting, for the gone screen below. Above the
+   * early return, because a hook cannot run conditionally.
+   */
+  const styles = STYLES[schemeOf(useColorScheme())];
 
   /*
    * Does this category exist? That is the only question asked here.
@@ -55,7 +73,6 @@ export default function CategoryPage() {
     /* The category was deleted before the page could read it. */
     return (
       <SafeAreaView style={styles.screen} edges={SAFE_EDGES}>
-        <StatusBar barStyle="light-content" />
         <View style={styles.bar}>
           <Pressable
             accessibilityRole="button"
@@ -80,25 +97,40 @@ export default function CategoryPage() {
 }
 
 /*
- * No "bottom", unlike comp/TitlePage.tsx's gone screen. SafeAreaView pads by
- * its provider's insets, not by where the view sits, and the tab bar below
- * this page already pads for the system navigation bar.
+ * No "bottom". SafeAreaView pads by its provider's insets, not by where the
+ * view sits, and the tab bar below this page already pads for the system
+ * navigation bar.
+ *
+ * comp/TitlePage.tsx and the list screen now pad three as well, so all three
+ * agree for the first time.
  */
 const SAFE_EDGES = ["top", "left", "right"] as const;
 
-/* YOURS TO RESTYLE. The same values as the list screen's bar and empty text,
- * so the gone page looks like the rest of the app. */
-const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: "#000000" },
-  bar: {
-    flexDirection: "row",
-    alignItems: "center",
-    paddingHorizontal: 20,
-    paddingTop: 16,
-    paddingBottom: 12,
-  },
-  barBack: { color: "#ECEDEE", fontSize: 30, fontWeight: "300", marginTop: -6 },
-  empty: { flex: 1, alignItems: "center", justifyContent: "center" },
-  emptyTitle: { color: "#ECEDEE", fontSize: 17, fontWeight: "600" },
-  emptyBody: { color: "#8A8F98", fontSize: 14, marginTop: 6 },
-});
+/* YOURS TO RESTYLE — everything but the colours, which come from
+ * theme/palette.ts. The same tokens the list screen's bar and empty text use,
+ * so the gone page looks like the rest of the app in both modes. */
+const makeStyles = (c: Palette) =>
+  StyleSheet.create({
+    screen: { flex: 1, backgroundColor: c.page },
+    bar: {
+      flexDirection: "row",
+      alignItems: "center",
+      paddingHorizontal: 20,
+      paddingTop: 16,
+      paddingBottom: 12,
+    },
+    barBack: {
+      color: c.text,
+      fontSize: 30,
+      fontWeight: "300",
+      marginTop: -6,
+    },
+    empty: { flex: 1, alignItems: "center", justifyContent: "center" },
+    emptyTitle: { color: c.text, fontSize: 17, fontWeight: "600" },
+    emptyBody: { color: c.textDim, fontSize: 14, marginTop: 6 },
+  });
+
+const STYLES: Record<Scheme, ReturnType<typeof makeStyles>> = {
+  dark: makeStyles(DARK),
+  light: makeStyles(LIGHT),
+};

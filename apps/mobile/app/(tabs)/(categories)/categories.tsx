@@ -27,9 +27,18 @@ import {
   StyleSheet,
   Text,
   TextInput,
+  useColorScheme,
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import {
+  DARK,
+  LIGHT,
+  PALETTES,
+  schemeOf,
+  type Palette,
+  type Scheme,
+} from "@/theme/palette";
 
 /*
  * Which edges the SafeAreaView pads. Not the bottom: the tab bar below this
@@ -57,6 +66,23 @@ type Pending = {
 };
 
 export default function Categories() {
+  /*
+   * Which palette this render draws in.
+   *
+   * useColorScheme re-renders this screen when the phone's setting
+   * changes, so the switch needs no reload. schemeOf folds its null and
+   * undefined into "dark", which is what the app has always been.
+   *
+   * Read ONCE, here, and handed down. CategoryManageList takes it as a
+   * prop rather than calling the hook itself, the same way todayStart and
+   * clock24 reach a row: one answer per render, so a child cannot
+   * disagree with its parent about the theme.
+   */
+  const scheme = schemeOf(useColorScheme());
+  const c = PALETTES[scheme];
+  /* One object read. Both StyleSheets were built at module load. */
+  const styles = STYLES[scheme];
+
   /*
    * The category version this list was read at.
    *
@@ -462,7 +488,9 @@ export default function Categories() {
   /* The colour the catalog draws a picked icon in: the editing category's
    * own, derived from its id by the same function every circle uses. */
   const pickerShade =
-    editId === null ? PLACEHOLDER_SHADE : shadeForCategory(editId);
+    editId === null
+      ? PLACEHOLDER_SHADE[scheme]
+      : shadeForCategory(editId, scheme);
 
   return (
     <SafeAreaView style={styles.screen} edges={SAFE_EDGES}>
@@ -490,7 +518,7 @@ export default function Categories() {
               placeholder={editId === null ? "New category" : "Rename to"}
               /* 5.22 against the pill's surface, computed. The old #5A606B
                * read 2.69 on it. */
-              placeholderTextColor="#8E8E93"
+              placeholderTextColor={c.placeholder}
               autoFocus
               // Enter on the keyboard does the same thing as the knob.
               onSubmitEditing={save}
@@ -543,6 +571,7 @@ export default function Categories() {
         <CategoryManageList
           items={items}
           icons={icons}
+          scheme={scheme}
           editingId={editId}
           draftIcon={iconDraft}
           undeletableId={UNCATEGORISED_ID}
@@ -601,7 +630,7 @@ export default function Categories() {
 
             {busy ? (
               <View style={styles.busyRow}>
-                <ActivityIndicator color="#8A8F98" />
+                <ActivityIndicator color={c.textDim} />
                 <Text style={styles.busyText}>Moving expenses…</Text>
               </View>
             ) : (
@@ -627,145 +656,158 @@ export default function Categories() {
   );
 }
 
-const styles = StyleSheet.create({
-  // YOURS TO RESTYLE. Black, like every other screen in the app.
-  screen: { flex: 1, backgroundColor: "#000000" },
+/*
+ * The StyleSheet, as a function of a palette.
+ *
+ * Called twice below, at module load, and never again. Building it inside
+ * the component would make a new StyleSheet on every render, and this
+ * screen renders on every keystroke in the Add pill.
+ */
+const makeStyles = (c: Palette) =>
+  StyleSheet.create({
+    // YOURS TO RESTYLE. Black, like every other screen in the app.
+    screen: { flex: 1, backgroundColor: c.page },
 
-  header: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    paddingHorizontal: 20,
-    paddingTop: 16,
-    paddingBottom: 12,
-  },
-  back: { color: "#ECEDEE", fontSize: 30, fontWeight: "300", marginTop: -6 },
-  backSpacer: { width: 18 },
-  title: { color: "#FFFFFF", fontSize: 20, fontWeight: "700" },
+    header: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-between",
+      paddingHorizontal: 20,
+      paddingTop: 16,
+      paddingBottom: 12,
+    },
+    back: { color: c.text, fontSize: 30, fontWeight: "300", marginTop: -6 },
+    backSpacer: { width: 18 },
+    title: { color: c.textStrong, fontSize: 20, fontWeight: "700" },
 
-  fieldArea: { paddingHorizontal: 20, paddingBottom: 16 },
+    fieldArea: { paddingHorizontal: 20, paddingBottom: 16 },
 
-  // Shared by both states. borderRadius is half of minHeight, which is what
-  // makes the ends semicircular rather than just rounded.
-  //
-  // No border any more. No other card in the app has one, and on black the
-  // old #2A2F38 hairline read 1.56 — a line doing nothing the surface was
-  // not already doing.
-  pill: {
-    alignItems: "center",
-    // Full width in BOTH states now, so it lives here rather than in the
-    // two variants below.
-    alignSelf: "stretch",
-    minHeight: 80,
-    borderRadius: 40,
-    padding: 8,
-  },
-  // The ONLY difference between the two states is which way the row runs.
-  // row-reverse paints the last child first, which is what puts the knob on
-  // the left without moving it in the JSX.
-  //
-  // Both carry the app's card colour, 1.23 against the black page — the same
-  // pair as every list card. They used to differ, so the sentence above is
-  // only now literally true.
-  pillClosed: {
-    flexDirection: "row-reverse",
-    backgroundColor: "#1C1C1E",
-  },
-  pillOpen: {
-    flexDirection: "row",
-    backgroundColor: "#1C1C1E",
-  },
+    // Shared by both states. borderRadius is half of minHeight, which is what
+    // makes the ends semicircular rather than just rounded.
+    //
+    // No border any more. No other card in the app has one, and on black the
+    // old #2A2F38 hairline read 1.56 — a line doing nothing the surface was
+    // not already doing.
+    pill: {
+      alignItems: "center",
+      // Full width in BOTH states now, so it lives here rather than in the
+      // two variants below.
+      alignSelf: "stretch",
+      minHeight: 80,
+      borderRadius: 40,
+      padding: 8,
+    },
+    // The ONLY difference between the two states is which way the row runs.
+    // row-reverse paints the last child first, which is what puts the knob on
+    // the left without moving it in the JSX.
+    //
+    // Both carry the app's card colour, 1.23 against the black page — the same
+    // pair as every list card. They used to differ, so the sentence above is
+    // only now literally true.
+    pillClosed: {
+      flexDirection: "row-reverse",
+      backgroundColor: c.card,
+    },
+    pillOpen: {
+      flexDirection: "row",
+      backgroundColor: c.card,
+    },
 
-  // flex: 1 is not cosmetic. Without it the Pressable is only as wide as
-  // the word "Add", and the rest of a full-width bar is dead to taps.
-  label: { flex: 1, paddingHorizontal: 22 },
-  labelText: { color: "#ECEDEE", fontSize: 19, fontWeight: "600" },
+    // flex: 1 is not cosmetic. Without it the Pressable is only as wide as
+    // the word "Add", and the rest of a full-width bar is dead to taps.
+    label: { flex: 1, paddingHorizontal: 22 },
+    labelText: { color: c.text, fontSize: 19, fontWeight: "600" },
 
-  input: {
-    flex: 1,
-    color: "#ECEDEE",
-    fontSize: 18,
-    paddingHorizontal: 18,
-    // Android gives TextInput vertical padding of its own, which would make
-    // the pill taller than 80 and stop the ends being semicircles.
-    paddingVertical: 0,
-  },
-  clear: { paddingHorizontal: 12 },
-  clearText: { color: "#8A8F98", fontSize: 18 },
+    input: {
+      flex: 1,
+      color: c.text,
+      fontSize: 18,
+      paddingHorizontal: 18,
+      // Android gives TextInput vertical padding of its own, which would make
+      // the pill taller than 80 and stop the ends being semicircles.
+      paddingVertical: 0,
+    },
+    clear: { paddingHorizontal: 12 },
+    clearText: { color: c.textDim, fontSize: 18 },
 
-  knob: {
-    width: 64,
-    height: 64,
-    borderRadius: 32,
-    backgroundColor: "#E5484D",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  knobText: {
-    color: "#FFFFFF",
-    fontSize: 28,
-    fontWeight: "600",
-    includeFontPadding: false,
-    marginTop: -2,
-  },
-  error: {
-    color: "#E5484D",
-    fontSize: 13,
-    paddingTop: 8,
-    paddingHorizontal: 12,
-  },
+    knob: {
+      width: 64,
+      height: 64,
+      borderRadius: 32,
+      backgroundColor: c.danger,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    knobText: {
+      color: c.onDanger,
+      fontSize: 28,
+      fontWeight: "600",
+      includeFontPadding: false,
+      marginTop: -2,
+    },
+    error: {
+      color: c.dangerInk,
+      fontSize: 13,
+      paddingTop: 8,
+      paddingHorizontal: 12,
+    },
 
-  /*
-   * The cards are inset 12 from the screen's edges and start 10 below the
-   * pill — the same two numbers as styles.list in
-   * comp/ExpenseListScreen.tsx, so the two lists line up with each other.
-   *
-   * paddingBottom is set at the call site, not here: it grows by the
-   * keyboard's height while the keyboard is up.
-   */
-  list: {
-    paddingHorizontal: 12,
-    paddingTop: 10,
-  },
+    /*
+     * The cards are inset 12 from the screen's edges and start 10 below the
+     * pill — the same two numbers as styles.list in
+     * comp/ExpenseListScreen.tsx, so the two lists line up with each other.
+     *
+     * paddingBottom is set at the call site, not here: it grows by the
+     * keyboard's height while the keyboard is up.
+     */
+    list: {
+      paddingHorizontal: 12,
+      paddingTop: 10,
+    },
 
-  backdrop: {
-    flex: 1,
-    backgroundColor: "rgba(0,0,0,0.6)",
-    alignItems: "center",
-    justifyContent: "center",
-    paddingHorizontal: 32,
-  },
-  /* The app's card colour, 1.23 against the dimmed black page — the same
-   * reading a list card gets against the page it sits on. */
-  dialog: {
-    width: "100%",
-    backgroundColor: "#1C1C1E",
-    borderRadius: 14,
-    padding: 20,
-  },
-  dialogTitle: {
-    color: "#FFFFFF",
-    fontSize: 17,
-    fontWeight: "700",
-    paddingBottom: 8,
-  },
-  dialogBody: { color: "#8A8F98", fontSize: 14, lineHeight: 20 },
-  dialogActions: {
-    flexDirection: "row",
-    justifyContent: "flex-end",
-    gap: 8,
-    paddingTop: 20,
-  },
-  dialogBtn: { paddingVertical: 10, paddingHorizontal: 16, borderRadius: 8 },
-  dialogBtnText: { color: "#8A8F98", fontSize: 15, fontWeight: "600" },
-  dialogBtnDanger: { backgroundColor: "#E5484D" },
-  dialogBtnDangerText: { color: "#FFFFFF", fontSize: 15, fontWeight: "600" },
+    backdrop: {
+      flex: 1,
+      backgroundColor: c.scrim,
+      alignItems: "center",
+      justifyContent: "center",
+      paddingHorizontal: 32,
+    },
+    /* The app's card colour, 1.23 against the dimmed black page — the same
+     * reading a list card gets against the page it sits on. */
+    dialog: {
+      width: "100%",
+      backgroundColor: c.card,
+      borderRadius: 14,
+      padding: 20,
+    },
+    dialogTitle: {
+      color: c.textStrong,
+      fontSize: 17,
+      fontWeight: "700",
+      paddingBottom: 8,
+    },
+    dialogBody: { color: c.textDim, fontSize: 14, lineHeight: 20 },
+    dialogActions: {
+      flexDirection: "row",
+      justifyContent: "flex-end",
+      gap: 8,
+      paddingTop: 20,
+    },
+    dialogBtn: { paddingVertical: 10, paddingHorizontal: 16, borderRadius: 8 },
+    dialogBtnText: { color: c.textDim, fontSize: 15, fontWeight: "600" },
+    dialogBtnDanger: { backgroundColor: c.danger },
+    dialogBtnDangerText: { color: c.onDanger, fontSize: 15, fontWeight: "600" },
 
-  busyRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-    paddingTop: 20,
-  },
-  busyText: { color: "#8A8F98", fontSize: 14 },
-});
+    busyRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 10,
+      paddingTop: 20,
+    },
+    busyText: { color: c.textDim, fontSize: 14 },
+  });
+
+const STYLES: Record<Scheme, ReturnType<typeof makeStyles>> = {
+  dark: makeStyles(DARK),
+  light: makeStyles(LIGHT),
+};

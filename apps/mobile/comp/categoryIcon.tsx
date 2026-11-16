@@ -1,6 +1,7 @@
 import Ionicons from "@expo/vector-icons/Ionicons";
 import MaterialCommunityIcons from "@expo/vector-icons/MaterialCommunityIcons";
 import type { CategoryIcons } from "@/db/expenses";
+import type { Scheme } from "@/theme/palette";
 
 /*
  * Everything that decides what a category's icon looks like, in one place.
@@ -9,10 +10,22 @@ import type { CategoryIcons } from "@/db/expenses";
  * rice, no tea, no pill; MaterialCommunityIcons has 7,448 and has all of
  * them. Both ship inside @expo/vector-icons 15.1.1, which was already
  * installed, so nothing was added and nothing was rebuilt.
+ *
+ * TWO COLOUR SETS NOW TOO, and that is why every function here takes a
+ * scheme. The glyph and circle colours are the one part of theming that a
+ * palette of named surfaces cannot carry: there are twelve of them, they are
+ * chosen by a hash rather than by a role, and they have to agree with each
+ * other. They live here, beside the rules that use them.
+ *
+ * Type-only import of Scheme, so this file still has no runtime dependency on
+ * theme/palette.ts and the two cannot form a cycle.
  */
 
 /* Which font a glyph belongs to. */
 export type IconFamily = "ion" | "mci";
+
+/* A glyph's colour and the circle behind it. */
+export type Shade = { color: string; tint: string };
 
 /*
  * HOW A FAMILY IS STORED, and the one rule that keeps old rows working.
@@ -111,37 +124,112 @@ export const iconsSignature = (icons: CategoryIcons): string =>
     .join(",");
 
 /*
- * Twelve colours for the category icons.
+ * Twelve colours for the category icons, each holding BOTH modes.
  *
- * `color` is the glyph. `tint` is the circle behind it: the same colour at 22%
- * over the card's #1C1C1E, worked out in advance so no blending happens while
- * a row draws.
+ * ONE ARRAY, NOT TWO, and that is the whole reason this is shaped like this.
+ * shadeForCategory hashes an id into a position in this array. Two separate
+ * arrays could drift to different lengths, and a different length means the
+ * same category lands on a different colour in light mode than in dark —
+ * which nothing would throw about and nobody would spot until a screenshot.
+ * One array has one length by construction.
  *
- * Every pair was checked against the surface it sits on and the weakest reads
- * 3.54. iOS's indigo #5E5CE6 is NOT in here: it read 2.75, under the 3.0 floor
- * for a glyph this size, and #7D7AFF replaces it at 4.05.
+ * `color` is the glyph. `tint` is the circle behind it, worked out in advance
+ * so no blending happens while a row draws.
+ *
+ * THE RULE IS THE SAME RULE IN BOTH MODES, INVERTED. The circle stays quiet
+ * and the glyph carries the meaning. Dark: a bright glyph on a dark faint
+ * disc, the glyph's own colour at 22% over the #1C1C1E card. Light: a dark
+ * glyph on a pale faint disc, at 18% over the #FFFFFF card.
+ *
+ * The dark glyphs could NOT simply be reused on a light card. Seven of the
+ * twelve fall below the 3.00 floor there — #FFD60A reads 1.27 and #FF9F0A
+ * 1.84 — and a 22% tint of a bright colour over a light card is invisible
+ * (1.07 to 1.31) with a glyph that cannot read on it (1.19 to 2.34). Each
+ * light glyph is its dark hue darkened until it reads 4.5 on its own tint.
+ *
+ * Every pair was computed. Light: glyph on tint 4.96 to 5.13, tint on card
+ * 1.30 to 1.35. Dark: glyph on tint 3.54 to 6.79, tint on card 1.14 to 1.35.
+ * So light mode is the stronger set, and both keep the circle nearly silent.
+ *
+ * THE TINTS WERE COMPUTED TWICE. The first set sat on a #F2F2F7 card and read
+ * 4.50 to 4.63. The card became #FFFFFF, so all twelve were recomputed rather
+ * than carried across: a tint is 18% of its glyph over THE CARD, so it
+ * outlives a change of card only by accident.
+ *
+ * iOS's indigo #5E5CE6 is NOT in the dark column: it read 2.75, under the
+ * floor, and #7D7AFF replaces it at 4.05.
  */
-const ICON_COLORS: { color: string; tint: string }[] = [
-  { color: "#FF453A", tint: "#4E2524" },
-  { color: "#FF9F0A", tint: "#4E391A" },
-  { color: "#FFD60A", tint: "#4E451A" },
-  { color: "#30D158", tint: "#20442B" },
-  { color: "#66D4CF", tint: "#2C4445" },
-  { color: "#40C8E0", tint: "#244249" },
-  { color: "#64D2FF", tint: "#2C4450" },
-  { color: "#0A84FF", tint: "#183350" },
-  { color: "#7D7AFF", tint: "#313150" },
-  { color: "#BF5AF2", tint: "#402A4D" },
-  { color: "#FF375F", tint: "#4E222C" },
-  { color: "#AC8E68", tint: "#3C352E" },
+const ICON_SHADES: Record<Scheme, Shade>[] = [
+  {
+    dark: { color: "#FF453A", tint: "#4E2524" },
+    light: { color: "#AB2E27", tint: "#F0D9D8" },
+  },
+  {
+    dark: { color: "#FF9F0A", tint: "#4E391A" },
+    light: { color: "#825105", tint: "#E9E0D2" },
+  },
+  {
+    dark: { color: "#FFD60A", tint: "#4E451A" },
+    light: { color: "#6E5C04", tint: "#E5E2D2" },
+  },
+  {
+    dark: { color: "#30D158", tint: "#20442B" },
+    light: { color: "#186B2D", tint: "#D5E4D9" },
+  },
+  {
+    dark: { color: "#66D4CF", tint: "#2C4445" },
+    light: { color: "#316663", tint: "#DAE3E3" },
+  },
+  {
+    dark: { color: "#40C8E0", tint: "#244249" },
+    light: { color: "#216672", tint: "#D7E3E6" },
+  },
+  {
+    dark: { color: "#64D2FF", tint: "#2C4450" },
+    light: { color: "#2F6378", tint: "#DAE3E7" },
+  },
+  {
+    dark: { color: "#0A84FF", tint: "#183350" },
+    light: { color: "#075CB2", tint: "#D2E2F1" },
+  },
+  {
+    dark: { color: "#7D7AFF", tint: "#313150" },
+    light: { color: "#5553AD", tint: "#E0E0F0" },
+  },
+  {
+    dark: { color: "#BF5AF2", tint: "#402A4D" },
+    light: { color: "#823DA5", tint: "#E9DCEF" },
+  },
+  {
+    dark: { color: "#FF375F", tint: "#4E222C" },
+    light: { color: "#AD2541", tint: "#F0D8DD" },
+  },
+  {
+    dark: { color: "#AC8E68", tint: "#3C352E" },
+    light: { color: "#6E5B43", tint: "#E5E1DD" },
+  },
 ];
 
 /*
- * What a category with no icon shows: the grey circle and near-white glyph the
- * cards had before any of this. Kept separate on purpose. "Nobody has chosen
- * an icon yet" should not look like a choice someone made.
+ * What a category with no icon shows: a quiet circle and a legible glyph.
+ * Kept separate from the twelve on purpose. "Nobody has chosen an icon yet"
+ * should not look like a choice someone made.
+ *
+ * Dark is exactly what the cards had before any of this: #ECEDEE on #2C2C2E,
+ * a circle reading 1.22 against the card and a glyph reading 11.89 on it.
+ *
+ * Light had to be chosen, and the same restraint drove it: #E5E5EA reads 1.26
+ * against the white card, the closest thing in the app to the dark circle's
+ * 1.22, with a #6E6E73 glyph on it at 4.04.
+ *
+ * theme/palette.ts still carries an `iconCircle` key with these two circle
+ * values in it. It predates 6f, when every circle was the same grey, and
+ * nothing reads it. Delete it once the list screen is converted.
  */
-export const PLACEHOLDER_SHADE = { color: "#ECEDEE", tint: "#2C2C2E" };
+export const PLACEHOLDER_SHADE: Record<Scheme, Shade> = {
+  dark: { color: "#ECEDEE", tint: "#2C2C2E" },
+  light: { color: "#6E6E73", tint: "#E5E5EA" },
+};
 
 /*
  * Which colour a category gets.
@@ -151,14 +239,16 @@ export const PLACEHOLDER_SHADE = { color: "#ECEDEE", tint: "#2C2C2E" };
  * ones included. The same id always lands on the same colour, so a colour
  * never moves by itself.
  *
+ * The hash picks a POSITION; the scheme picks which half of that position to
+ * use. So a category keeps its identity across a theme switch — Transport is
+ * the fifth colour in both modes, not a different colour in each.
+ *
  * Once a picker exists to choose a colour, a stored one simply overrides this.
  */
-export const shadeForCategory = (
-  id: string,
-): { color: string; tint: string } => {
+export const shadeForCategory = (id: string, scheme: Scheme): Shade => {
   let h = 0;
   for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) | 0;
-  return ICON_COLORS[Math.abs(h) % ICON_COLORS.length];
+  return ICON_SHADES[Math.abs(h) % ICON_SHADES.length][scheme];
 };
 
 /*
@@ -180,12 +270,25 @@ export type ResolvedIcon = {
   tint: string;
 };
 
+/*
+ * `scheme` is REQUIRED, deliberately, and it is the last argument so the two
+ * existing ones keep their positions.
+ *
+ * A default of "dark" would have saved editing the call sites. It would also
+ * mean a screen that forgets to pass its scheme draws dark icons on a light
+ * page, with nothing thrown and nothing logged — the same silent shape as a
+ * screen that cannot blur for its own write. Required means the compiler
+ * names every caller instead.
+ */
 export const iconFor = (
   categoryId: string | null,
   chosen: string | undefined,
+  scheme: Scheme,
 ): ResolvedIcon => {
   const shade =
-    chosen && categoryId ? shadeForCategory(categoryId) : PLACEHOLDER_SHADE;
+    chosen && categoryId
+      ? shadeForCategory(categoryId, scheme)
+      : PLACEHOLDER_SHADE[scheme];
   const parsed = chosen ? parseIcon(chosen) : null;
   const glyph =
     parsed && familyKnows(parsed.family, parsed.name)
@@ -210,8 +313,9 @@ export const iconFor = (
 export const iconForRow = (
   categoryId: string | null,
   icons: CategoryIcons,
+  scheme: Scheme,
 ): ResolvedIcon =>
-  iconFor(categoryId, categoryId ? icons[categoryId] : undefined);
+  iconFor(categoryId, categoryId ? icons[categoryId] : undefined, scheme);
 
 /*
  * Draws a glyph from whichever font it belongs to.

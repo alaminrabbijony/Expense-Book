@@ -1,8 +1,10 @@
 import Ionicons from "@expo/vector-icons/Ionicons";
 import MaterialCommunityIcons from "@expo/vector-icons/MaterialCommunityIcons";
 import { Stack } from "expo-router";
+import { StatusBar, useColorScheme } from "react-native";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { KeyboardProvider } from "react-native-keyboard-controller";
+import { PALETTES, schemeOf } from "@/theme/palette";
 
 /*
  * Load the icon fonts once, as soon as the app starts.
@@ -30,7 +32,9 @@ function preloadIconFont(label: string, load: () => Promise<void>) {
   load()
     .then(() => {
       if (__DEV__) {
-        console.log(`icon font loaded: ${label} after ${Date.now() - startedAt}ms`);
+        console.log(
+          `icon font loaded: ${label} after ${Date.now() - startedAt}ms`,
+        );
       }
     })
     .catch((e: unknown) => {
@@ -57,6 +61,35 @@ preloadIconFont("MaterialCommunityIcons", () =>
  */
 const STACK_OPTIONS = { headerShown: false };
 
+/*
+ * THE CLOCK AND BATTERY ICONS, FOR THE WHOLE APP, IN ONE PLACE.
+ *
+ * React Native's StatusBar is not a normal component. Every mounted one goes
+ * into a stack inside the module, and THE MOST RECENTLY MOUNTED ONE WINS —
+ * so two of them in the tree is not two settings, it is a race decided by
+ * mount order.
+ *
+ * That is why this cannot stay per screen. Tab screens mount the first time
+ * they are visited and then stay mounted, so a StatusBar on the Categories
+ * tab would keep winning after a switch back to Home. In light mode that
+ * would put dark icons on Home's black page: a screen broken by a screen
+ * that is not even on top.
+ *
+ * So: one here, and the hardcoded "light-content" ones came OUT of
+ * comp/ExpenseListScreen.tsx and comp/CategoryPage.tsx. If a third turns up
+ * anywhere, it silently takes over from this one.
+ *
+ * ITS OWN COMPONENT, not useColorScheme() in RootLayout, and that is the
+ * point of it being three lines. The hook re-renders the component that
+ * calls it. Called here, a theme switch re-renders this and nothing else.
+ * Called in RootLayout, it would re-render the component that wraps the
+ * gesture root, the keyboard provider and the whole navigation tree.
+ */
+function ThemedStatusBar() {
+  const scheme = schemeOf(useColorScheme());
+  return <StatusBar barStyle={PALETTES[scheme].statusBar} />;
+}
+
 export default function RootLayout() {
   return (
     // No style prop, on purpose.
@@ -67,6 +100,8 @@ export default function RootLayout() {
     // this View to zero height and the app renders blank. Passing nothing at
     // all is the version that cannot be got wrong.
     <GestureHandlerRootView>
+      <ThemedStatusBar />
+
       {/* Every KeyboardAvoidingView from react-native-keyboard-controller
           reads the keyboard's movement from this provider. Outside it, that
           view silently never moves; the only sign is a dev warning saying
