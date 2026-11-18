@@ -4,6 +4,7 @@ import {
   Keyboard,
   Modal,
   Pressable,
+  StatusBar,
   StyleSheet,
   Text,
   useColorScheme,
@@ -55,7 +56,10 @@ export default function BottomSheet({ visible, title, onClose, children }: Props
         console.log(
           `keyboard show: height ${Math.round(e.endCoordinates.height)}, ` +
             `top at ${Math.round(e.endCoordinates.screenY)}, ` +
-            `${Date.now() - t0}ms after the sheet opened`,
+            `${Date.now() - t0}ms after the sheet opened, ` +
+            // The number KEYBOARD_OFFSET is built from (see the bottom of
+            // this file). Printed so a new phone shows what it subtracted.
+            `status bar ${StatusBar.currentHeight ?? "n/a"}`,
         ),
       ),
       Keyboard.addListener("keyboardDidHide", () =>
@@ -98,8 +102,16 @@ export default function BottomSheet({ visible, title, onClose, children }: Props
           the top of the screen. It measures itself from its parent's top,
           and the keyboard's top as the window height minus the keyboard
           height; those agree only when this view's top is the window's top.
-          Do not wrap it in anything with a margin or a header above it. */}
-      <KeyboardAvoidingView style={styles.backdrop} behavior="padding">
+          Do not wrap it in anything with a margin or a header above it.
+
+          keyboardVerticalOffset: see KEYBOARD_OFFSET at the bottom of this
+          file. Without it the sheet stops 50 dp above the keyboard on the
+          Pixel 8 emulator. */}
+      <KeyboardAvoidingView
+        style={styles.backdrop}
+        behavior="padding"
+        keyboardVerticalOffset={KEYBOARD_OFFSET}
+      >
         {/* Fills the window and sits behind the panel, so a tap anywhere
             outside closes. Rendered before the sheet, so the sheet wins. */}
         <Pressable style={StyleSheet.absoluteFill} onPress={onClose} />
@@ -107,10 +119,11 @@ export default function BottomSheet({ visible, title, onClose, children }: Props
         <View
           style={styles.sheet}
           /*
-           * DEV ONLY, and here to settle one question: there is a ~46dp band
-           * of dimmed page between this sheet's bottom edge and the top of
-           * the keyboard, and it predates the palette — it is in screenshots
-           * from before this file was themed.
+           * DEV ONLY. It measured the 50 dp gap between this sheet and the
+           * keyboard (Session 36: sheet bottom 528, keyboard top 578, six
+           * raises out of six), and it is kept to prove KEYBOARD_OFFSET
+           * closes it: with the keyboard up, the settled "bottom" here
+           * should equal the "top at" in the keyboard show line.
            *
            * This prints where the sheet's bottom actually lands. Read it
            * beside the "keyboard show" line above: that one gives the
@@ -211,6 +224,35 @@ function makeStyles(c: Palette) {
     },
   });
 }
+
+/*
+ * How far to pull the sheet back down when the keyboard is up. Negative,
+ * because keyboard-controller lifts by too much.
+ *
+ * Why the status bar. keyboard-controller pads this view by 386 where the
+ * keyboard covers 336 [Session 36, device + its source]. Session 37 logged
+ * StatusBar.currentHeight = 50.29 on four raises out of four — 132 pixels at
+ * this emulator's 2.625 density — and the gap is 50 on the same four. The
+ * sheet's very first layout also lands at bottom 864, which is 914 minus
+ * 50.29: for one frame the Modal's window is one status bar shorter than the
+ * app's. The leading suspicion is that the library and the Modal disagree by
+ * that bar. That is supported, not proved; a phone with a different status
+ * bar height closing its gap too is what proves it.
+ *
+ * Why NOT useSafeAreaInsets().top. It printed 0 inside this sheet on all
+ * four raises. -insets.top compiles and subtracts nothing.
+ *
+ * Why NOT a literal -50. That is this emulator's bar. A phone with a 24 or a
+ * 48 dp bar would end up overlapping its keyboard or keeping a gap.
+ *
+ * iOS: currentHeight is null there, so the offset is 0 and iOS is unchanged.
+ *
+ * A module-level constant is honest here, not a shortcut: React Native reads
+ * currentHeight once, at module load, from the native constants
+ * (StatusBar.js 260-263, 0.81.5). It does not update afterwards, so reading it
+ * inside the component would read the same number every render.
+ */
+const KEYBOARD_OFFSET = -(StatusBar.currentHeight ?? 0);
 
 /*
  * Built twice at module load, once per palette — the shape every themed file
