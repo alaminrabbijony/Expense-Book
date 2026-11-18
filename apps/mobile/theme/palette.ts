@@ -123,6 +123,31 @@ export type Palette = {
    */
   menuBg: string;
 
+  /**
+   * The PICKED segment of a segmented control (the theme switch on the
+   * Settings tab), and the word on it. The track behind the segments is
+   * `card`; the unpicked words on the track are `textDim`.
+   *
+   * The values are `text` and `card` swapped — the picked segment is an
+   * inverted pill. They are separate tokens anyway, named for this job,
+   * because `text` is a TEXT colour: borrowing it as a fill means the day
+   * someone retunes body text, this control changes too, with nothing to say
+   * why. Same reasoning that split `danger` from `dangerInk`.
+   *
+   * Computed (Session 37), dark / light:
+   *   selectedBg against the card track      14.52 / 17.01
+   *   selectedInk on selectedBg              14.52 / 17.01
+   *   textDim (unpicked) on the card track    5.24 /  5.07
+   *   the card track against the page         1.23 /  1.12
+   *
+   * The iOS-style alternative — a white segment on a pale grey track — was
+   * computed and rejected: 1.28 between segment and track in light, and
+   * 3.97 for the unpicked words. iOS rescues it with a drop shadow; this app
+   * uses no shadows on cards.
+   */
+  selectedBg: string;
+  selectedInk: string;
+
   /** Titles, amounts, names, the empty screen's heading. */
   text: string;
   /** A screen's own title, and a dialog's. Brighter than `text`. */
@@ -257,6 +282,8 @@ export const DARK: Palette = {
   barAddIcon: "#000000",
   card: "#1C1C1E",
   menuBg: "#2C2C2E",
+  selectedBg: "#ECEDEE",
+  selectedInk: "#1C1C1E",
   text: "#ECEDEE",
   textStrong: "#FFFFFF",
   textDim: "#8A8F98",
@@ -295,6 +322,8 @@ export const LIGHT: Palette = {
   barAddIcon: "#FFFFFF",
   card: "#FFFFFF",
   menuBg: "#FFFFFF",
+  selectedBg: "#1C1C1E",
+  selectedInk: "#FFFFFF",
   text: "#1C1C1E",
   textStrong: "#000000",
   textDim: "#6E6E73",
