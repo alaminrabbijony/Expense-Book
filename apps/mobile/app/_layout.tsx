@@ -5,6 +5,8 @@ import { StatusBar, useColorScheme } from "react-native";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { KeyboardProvider } from "react-native-keyboard-controller";
 import { PALETTES, schemeOf } from "@/theme/palette";
+import { applySavedThemeChoice } from "@/theme/themeChoice";
+
 
 /*
  * Load the icon fonts once, as soon as the app starts.
@@ -48,6 +50,20 @@ preloadIconFont("MaterialCommunityIcons", () =>
 );
 
 /*
+ * THE IN-APP THEME CHOICE, applied once, at module load.
+ *
+ * Here and not in an effect: an effect runs AFTER the first render, so the
+ * first frame would always be the phone's scheme. Module load runs before
+ * RootLayout renders at all.
+ *
+ * LAUNCHED_AT is for the dev line in ThemedStatusBar below. It is set on the
+ * line before the apply, so "Nms after launch" there is measured from the
+ * moment the choice was applied.
+ */
+const LAUNCHED_AT = Date.now();
+applySavedThemeChoice();
+
+/*
  * The root Stack holds one screen: the (tabs) group. Every screen inside it
  * draws its own top, so the Stack's header is switched off here, once.
  * Without this, the Stack draws its own header bar above the tabs, the same
@@ -86,7 +102,31 @@ const STACK_OPTIONS = { headerShown: false };
  * gesture root, the keyboard provider and the whole navigation tree.
  */
 function ThemedStatusBar() {
-  const scheme = schemeOf(useColorScheme());
+  const raw = useColorScheme();
+  const scheme = schemeOf(raw);
+
+  /*
+   * DEV ONLY, Session 37 — one line per render of the one component that
+   * re-renders on every scheme change and on nothing else.
+   *
+   * It answers two questions the in-app switch raises:
+   *
+   *   1. At launch, is the FIRST render already in the saved scheme? If the
+   *      first line shows the phone's scheme and a second line flips it, the
+   *      app shows one wrong frame on every launch. That is the Android queue
+   *      described in theme/themeChoice.ts, measured rather than guessed.
+   *
+   *   2. After a tap, does a new line appear at all? setColorScheme() tells no
+   *      listener; only Android's "appearanceChanged" event does. A tap with
+   *      no new line here means that event never came.
+   */
+  if (__DEV__) {
+    console.log(
+      `[theme] status bar render: useColorScheme "${raw}", ` +
+        `${Date.now() - LAUNCHED_AT}ms after launch`,
+    );
+  }
+
   return <StatusBar barStyle={PALETTES[scheme].statusBar} />;
 }
 
