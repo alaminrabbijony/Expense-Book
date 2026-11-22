@@ -4,3 +4,4 @@ packages:
 nodeLinker: hoisted
 allowBuilds:
   unrs-resolver: false
+  esbuild: true

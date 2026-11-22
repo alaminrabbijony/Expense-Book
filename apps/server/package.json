@@ -5,13 +5,22 @@
   "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "dev": "node --watch src/index.ts"
+    "dev": "node --env-file=.env --watch src/server.ts"
   },
   "dependencies": {
-    "@et/shared": "workspace:*"
+    "@et/shared": "workspace:*",
+    "drizzle-orm": "^0.45.4",
+    "express": "^5.3.0",
+    "pg": "^8.23.1",
+    "pino": "^10.4.0",
+    "zod": "^4.6.7"
   },
   "devDependencies": {
+    "@types/express": "^5.0.6",
     "@types/node": "^24.3.0",
+    "@types/pg": "^8.23.1",
+    "drizzle-kit": "^0.31.11",
+    "pino-pretty": "^13.2.0",
     "typescript": "^5.9.2"
   }
 }

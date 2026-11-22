@@ -11,7 +11,12 @@ services:
     ports:
       - '54321:5432'                # 54321 avoids clashing with a local Postgres on 5432
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      # Postgres 18's image keeps its data in /var/lib/postgresql/18/docker and
+      # declares /var/lib/postgresql as its volume. The pre-18 path
+      # (/var/lib/postgresql/data) makes the container exit or lose data on
+      # restart. Mount the parent; the image creates its own version folder
+      # inside, so a future Postgres 19 lives beside 18 instead of on top of it.
+      - pgdata:/var/lib/postgresql
     command:
       - -c
       - listen_addresses=*
@@ -29,7 +34,7 @@ services:
     environment:
       DATABASE_URL: postgresql://postgres:password@postgres:5432/expense_tracker?sslmode=disable
       # Local dev without an auth secret. If the container rejects this env var,
-      # delete it — the flag name has changed across versions.
+      # delete it - the flag name has changed across versions.
       ELECTRIC_INSECURE: 'true'
     ports:
       - '3000:3000'
