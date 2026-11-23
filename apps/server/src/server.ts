@@ -3,6 +3,7 @@ import type { Socket } from 'node:net';
 
 import app, { activeReq } from './app.ts';
 import env from './config/env.ts';
+import { closeDB, initDB } from './db/index.ts';
 import { logger } from './lib/logger.ts';
 
 let server: Server | undefined;
@@ -56,7 +57,7 @@ process.on('SIGTERM', () => void gracefulShutdown('SIGTERM', 0));
  *   1. wait for in-flight requests (activeReq → 0), so none is cut mid-write
  *   2. destroy the sockets still open (idle keep-alive connections)
  *   3. server.close(), which now resolves at once
- *   (4. drain the database pool — added in 7b)
+ *   4. drain the database pool, last: no request can still be using it
  * A 10s timer kills the process if any step hangs. unref() stops that timer
  * from keeping the process alive by itself.
  * ─────────────────────────────────────────────────────────────────────────── */
@@ -89,6 +90,15 @@ async function gracefulShutdown(signal: string, exitCode: number): Promise<void>
       logger.info({ event: 'server_closed' }, 'HTTP server closed');
     }
 
+    // pool.end() waits for queries still running. If one hangs, this race
+    // gives up after 5s instead of leaving shutdown to the 10s force-exit.
+    await Promise.race([
+      closeDB(),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('DB shutdown timed out after 5s')), 5_000),
+      ),
+    ]);
+
     clearTimeout(forceExit);
     logger.info(
       { event: 'shutdown_complete', durationMs: Date.now() - shutdownStart },
@@ -103,12 +113,32 @@ async function gracefulShutdown(signal: string, exitCode: number): Promise<void>
 
 /* ── Bootstrap ───────────────────────────────────────────────────────────────
  * Phase 1: env is validated the moment config/env.ts is imported (above).
- * Phase 2: the database check before listen() — added in 7b.
+ * Phase 2: the database answers BEFORE listen(). Never accept a request the
+ *          server cannot serve. The 5s race matches the pool's
+ *          connectionTimeoutMillis, so an unreachable database fails here,
+ *          at startup, with one clear line.
  * Phase 3: listen, and track sockets from the first connection.
  * Phase 4: a port that is busy or forbidden exits with a clear line.
  * ─────────────────────────────────────────────────────────────────────────── */
-function bootstrap(): void {
-  server = app.listen(env.PORT, () => {
+async function bootstrap(): Promise<void> {
+  try {
+    await Promise.race([
+      initDB(),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('DB connection timed out after 5s')), 5_000),
+      ),
+    ]);
+  } catch (err) {
+    logger.fatal({ event: 'bootstrap_failed', err }, 'Database unreachable. Server not started');
+    process.exit(1);
+  }
+
+  // Express 5 calls this callback on FAILURE too, with the error as its
+  // argument (lib/application.js: server.once('error', done)). Without the
+  // early return, a busy port printed "Server listening" right before
+  // "Port 4000 is already in use". The 'error' listener below reports it.
+  server = app.listen(env.PORT, (err) => {
+    if (err) return;
     logger.info(
       { event: 'server_start', port: env.PORT, env: env.NODE_ENV },
       `Server listening on port ${env.PORT}`,
@@ -131,5 +161,4 @@ function bootstrap(): void {
     process.exit(1);
   });
 }
-
-bootstrap();
+void bootstrap();

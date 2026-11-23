@@ -4,6 +4,7 @@ services:
   postgres:
     image: docker.io/postgres:18-alpine
     container_name: et-postgres
+    restart: unless-stopped        # start with Docker; stay stopped only if I stop it
     environment:
       POSTGRES_DB: expense_tracker
       POSTGRES_USER: postgres
